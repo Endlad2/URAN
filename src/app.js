@@ -140,6 +140,8 @@ async function loadUserAvatar(username, photoUrl) {
             const userHash = match[1];
             const zipUrl = `https://www.uran-chat.space/user_photo.php?user=${userHash}`;
             
+            console.log(`Загрузка фото для ${username}:`, zipUrl);
+            
             const response = await fetch(zipUrl);
             
             if (!response.ok) {
@@ -202,6 +204,7 @@ async function loadCurrentUser() {
                 if (avatarDataUrl) {
                     avatarImg.src = avatarDataUrl;
                     avatarImg.style.display = 'block';
+                    console.log('Аватар текущего пользователя загружен');
                 }
             }
         } else {
@@ -630,6 +633,22 @@ async function fetchUserInfo(username) {
     }
 }
 
+async function loadChatAvatar(username, photoUrl, avatarElement) {
+    if (!photoUrl || !avatarElement) return;
+    
+    console.log(`Загрузка аватара для чата: ${username}`);
+    const avatarDataUrl = await loadUserAvatar(username, photoUrl);
+    if (avatarDataUrl) {
+        avatarElement.src = avatarDataUrl;
+        avatarElement.style.display = 'block';
+        const initialsSpan = avatarElement.parentElement.querySelector('.chat-avatar-initials');
+        if (initialsSpan) {
+            initialsSpan.style.display = 'none';
+        }
+        console.log(`Аватар загружен для ${username}`);
+    }
+}
+
 async function addNewChat(chatWith) {
     if (!currentUser) return false;
     
@@ -720,6 +739,14 @@ async function refreshChatsList() {
     for (const [username, chatData] of sortedChats) {
         const chatItem = createChatItem(username, chatData);
         chatsList.appendChild(chatItem);
+        
+        const userInfo = await fetchUserInfo(username);
+        if (userInfo.photo) {
+            const avatarImg = chatItem.querySelector('.chat-avatar-img');
+            if (avatarImg) {
+                await loadChatAvatar(username, userInfo.photo, avatarImg);
+            }
+        }
     }
     
     if (chats.size === 0) {
@@ -826,6 +853,7 @@ function openChat(username) {
                         img.style.borderRadius = '50%';
                         img.style.objectFit = 'cover';
                         headerAvatar.appendChild(img);
+                        console.log(`Аватар загружен для шапки чата: ${username}`);
                     }
                 });
             }
@@ -1059,7 +1087,8 @@ function startOfflineMessageChecker() {
     }
     offlineCheckInterval = setInterval(async () => {
         await checkOfflineMessages();
-    }, 15000);
+    }, 5000);
+    console.log('Запущена проверка офлайн сообщений (каждые 5 секунд)');
 }
 
 async function init() {
