@@ -22,6 +22,10 @@ const peerConfig = {
     debug: 3
 };
 
+function getPeerId(username) {
+    return `${username}-uranchat`;
+}
+
 async function loadUserAvatar(username, photoUrl) {
     if (!photoUrl) {
         return `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=667eea&color=fff&rounded=true&size=128`;
@@ -104,20 +108,13 @@ async function loadCurrentUser() {
             
             console.log('Загружен пользователь:', currentUser);
             
-            if (currentUser.photo) {
-                const avatarDataUrl = await loadUserAvatar(currentUser.username, currentUser.photo);
-                currentUser.avatarDataUrl = avatarDataUrl;
-                const avatarImg = document.getElementById('currentUserAvatar');
-                if (avatarImg) {
-                    avatarImg.src = avatarDataUrl;
-                    console.log('Аватар текущего пользователя установлен (data:url)');
-                }
-            } else {
-                const defaultAvatar = `https://ui-avatars.com/api/?name=${encodeURIComponent(currentUser.username)}&background=667eea&color=fff&rounded=true&size=128`;
-                const avatarImg = document.getElementById('currentUserAvatar');
-                if (avatarImg) {
-                    avatarImg.src = defaultAvatar;
-                }
+            const avatarDataUrl = await loadUserAvatar(currentUser.username, currentUser.photo);
+            currentUser.avatarDataUrl = avatarDataUrl;
+            
+            const avatarImg = document.getElementById('currentUserAvatar');
+            if (avatarImg) {
+                avatarImg.src = avatarDataUrl;
+                console.log('Аватар текущего пользователя установлен');
             }
         } else {
             throw new Error('No session found');
@@ -148,7 +145,10 @@ function initPeer() {
             return;
         }
         
-        peer = new Peer(currentUser.id.toString(), peerConfig);
+        const peerId = getPeerId(currentUser.username);
+        console.log('Создаем Peer с ID:', peerId);
+        
+        peer = new Peer(peerId, peerConfig);
         
         const timeout = setTimeout(() => {
             reject(new Error('PeerJS connection timeout'));
@@ -173,7 +173,7 @@ function initPeer() {
             if (err.type === 'unavailable-id' && peer) {
                 console.warn('ID занят, переподключаемся с другим ID');
                 peer.destroy();
-                peer = new Peer(crypto.randomUUID(), peerConfig);
+                peer = new Peer(getPeerId(currentUser.username + crypto.randomUUID()), peerConfig);
             } else if (err.type === 'disconnected') {
                 setTimeout(() => peer?.reconnect(), 3000);
             }
@@ -326,7 +326,9 @@ async function sendMessage(text) {
     await saveMessage(currentChat, message);
     displayMessage(message);
     
-    const conn = connections.get(currentChat);
+    const peerId = getPeerId(currentChat);
+    const conn = connections.get(peerId);
+    
     if (conn && conn.open) {
         conn.send({
             type: 'message',
@@ -367,7 +369,8 @@ function showMessageQueued(username, text) {
         statusDiv.textContent = 'Сообщение будет доставлено при появлении онлайн';
         statusDiv.style.color = '#ff9800';
         setTimeout(() => {
-            const conn = connections.get(username);
+            const peerId = getPeerId(username);
+            const conn = connections.get(peerId);
             if (conn && conn.open) {
                 statusDiv.textContent = 'Онлайн';
                 statusDiv.style.color = '#4caf50';
@@ -496,10 +499,9 @@ async function loadChats() {
             const decrypted = await decryptData(JSON.parse(encryptedData), key);
             chats = new Map(decrypted);
             
-            // Обновляем старые blob URL на data URL
             for (const [username, chatData] of chats) {
-                if (chatData.avatar && !chatData.avatar.startsWith('data:') && !chatData.avatar.startsWith('http')) {
-                    console.log('Обновляем устаревший аватар для:', username);
+                if (!chatData.avatar || (!chatData.avatar.startsWith('data:') && !chatData.avatar.startsWith('http'))) {
+                    console.log('Загружаем аватар для:', username);
                     const newAvatar = await loadUserAvatar(username, null);
                     chatData.avatar = newAvatar;
                 }
@@ -616,14 +618,17 @@ async function connectToUser(username) {
         console.error('Ошибка проверки пользователя:', error);
     }
     
-    if (connections.has(username)) {
-        const conn = connections.get(username);
+    const peerId = getPeerId(username);
+    
+    if (connections.has(peerId)) {
+        const conn = connections.get(peerId);
         if (conn && conn.open) {
             return conn;
         }
     }
     
-    const conn = peer.connect(username, {
+    console.log('Подключаемся к Peer ID:', peerId);
+    const conn = peer.connect(peerId, {
         reliable: true,
         serialization: 'json'
     });
@@ -644,13 +649,6 @@ function updateUI() {
             if (avatarImg) {
                 avatarImg.src = currentUser.avatarDataUrl;
             }
-        } else if (currentUser.photo) {
-            loadUserAvatar(currentUser.username, currentUser.photo).then(url => {
-                const avatarImg = document.getElementById('currentUserAvatar');
-                if (avatarImg) {
-                    avatarImg.src = url;
-                }
-            });
         }
     }
     
@@ -690,6 +688,8 @@ function createChatItem(username, chatData) {
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
     
+    console.log('Создание чат-элемента для:', username, 'avatar:', chatData.avatar ? chatData.avatar.substring(0, 50) : 'null');
+    
     if (chatData.avatar && (chatData.avatar.startsWith('data:') || chatData.avatar.startsWith('http'))) {
         const img = document.createElement('img');
         img.src = chatData.avatar;
@@ -700,6 +700,11 @@ function createChatItem(username, chatData) {
         avatarDiv.appendChild(img);
     } else {
         avatarDiv.textContent = username.charAt(0).toUpperCase();
+        avatarDiv.style.display = 'flex';
+        avatarDiv.style.alignItems = 'center';
+        avatarDiv.style.justifyContent = 'center';
+        avatarDiv.style.fontSize = '20px';
+        avatarDiv.style.fontWeight = 'bold';
     }
     
     const infoDiv = document.createElement('div');
@@ -744,28 +749,35 @@ function openChat(username) {
     if (headerName) headerName.textContent = username;
     if (headerAvatar) {
         headerAvatar.innerHTML = '';
-        headerAvatar.textContent = username.charAt(0).toUpperCase();
+        
+        const chat = chats.get(username);
+        if (chat && chat.avatar && (chat.avatar.startsWith('data:') || chat.avatar.startsWith('http'))) {
+            const avatarImg = document.createElement('img');
+            avatarImg.src = chat.avatar;
+            avatarImg.style.width = '45px';
+            avatarImg.style.height = '45px';
+            avatarImg.style.borderRadius = '50%';
+            avatarImg.style.objectFit = 'cover';
+            headerAvatar.appendChild(avatarImg);
+        } else {
+            headerAvatar.textContent = username.charAt(0).toUpperCase();
+            headerAvatar.style.display = 'flex';
+            headerAvatar.style.alignItems = 'center';
+            headerAvatar.style.justifyContent = 'center';
+            headerAvatar.style.fontSize = '20px';
+            headerAvatar.style.fontWeight = 'bold';
+        }
     }
     if (messageInput) messageInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
     
-    const chat = chats.get(username);
-    if (chat && chat.avatar && headerAvatar && (chat.avatar.startsWith('data:') || chat.avatar.startsWith('http'))) {
-        const avatarImg = document.createElement('img');
-        avatarImg.src = chat.avatar;
-        avatarImg.style.width = '45px';
-        avatarImg.style.height = '45px';
-        avatarImg.style.borderRadius = '50%';
-        avatarImg.style.objectFit = 'cover';
-        headerAvatar.innerHTML = '';
-        headerAvatar.appendChild(avatarImg);
-    }
-    
     displayChatMessages(username);
     
-    const conn = connections.get(username);
+    const peerId = getPeerId(username);
+    const conn = connections.get(peerId);
     updateConnectionStatus(conn && conn.open);
     
+    const chat = chats.get(username);
     if (chat) {
         const unreadMessages = chat.messages.filter(m => m.sender === username && !m.isRead);
         for (const msg of unreadMessages) {
@@ -861,28 +873,34 @@ function updateConnectionStatus(isConnected) {
     }
 }
 
-function updateUserStatus(username, isOnline) {
-    if (currentChat === username) {
-        updateConnectionStatus(isOnline);
+function updateUserStatus(peerId, isOnline) {
+    for (const [username, chatData] of chats) {
+        if (getPeerId(username) === peerId && currentChat === username) {
+            updateConnectionStatus(isOnline);
+            break;
+        }
     }
 }
 
-function updateTypingStatus(username, isTyping) {
-    if (currentChat === username) {
-        const statusDiv = document.getElementById('chatHeaderStatus');
-        if (statusDiv && isTyping) {
-            statusDiv.textContent = 'Печатает...';
-            statusDiv.style.color = '#ff9800';
-            setTimeout(() => {
-                const conn = connections.get(username);
-                if (conn && conn.open) {
-                    statusDiv.textContent = 'Онлайн';
-                    statusDiv.style.color = '#4caf50';
-                } else {
-                    statusDiv.textContent = 'Оффлайн';
-                    statusDiv.style.color = '#f44336';
-                }
-            }, 2000);
+function updateTypingStatus(peerId, isTyping) {
+    for (const [username, chatData] of chats) {
+        if (getPeerId(username) === peerId && currentChat === username) {
+            const statusDiv = document.getElementById('chatHeaderStatus');
+            if (statusDiv && isTyping) {
+                statusDiv.textContent = 'Печатает...';
+                statusDiv.style.color = '#ff9800';
+                setTimeout(() => {
+                    const conn = connections.get(peerId);
+                    if (conn && conn.open) {
+                        statusDiv.textContent = 'Онлайн';
+                        statusDiv.style.color = '#4caf50';
+                    } else {
+                        statusDiv.textContent = 'Оффлайн';
+                        statusDiv.style.color = '#f44336';
+                    }
+                }, 2000);
+            }
+            break;
         }
     }
 }
@@ -946,8 +964,9 @@ function setupEventListeners() {
     let typingTimeout;
     if (messageInput) {
         messageInput.oninput = () => {
-            if (currentChat && connections.has(currentChat)) {
-                const conn = connections.get(currentChat);
+            if (currentChat) {
+                const peerId = getPeerId(currentChat);
+                const conn = connections.get(peerId);
                 if (conn && conn.open) {
                     conn.send({
                         type: 'typing',
@@ -971,18 +990,22 @@ function setupEventListeners() {
 
 function startMessageChecker() {
     setInterval(() => {
-        for (const [username, conn] of connections) {
+        for (const [peerId, conn] of connections) {
             if (!conn.open) {
-                connections.delete(username);
-                if (currentChat === username) {
-                    updateConnectionStatus(false);
+                connections.delete(peerId);
+                for (const [username, chatData] of chats) {
+                    if (getPeerId(username) === peerId && currentChat === username) {
+                        updateConnectionStatus(false);
+                        break;
+                    }
                 }
             }
         }
         
         for (const [username, pending] of pendingMessages) {
             if (pending.length > 0) {
-                const conn = connections.get(username);
+                const peerId = getPeerId(username);
+                const conn = connections.get(peerId);
                 if (conn && conn.open && currentUser) {
                     for (const msg of pending) {
                         conn.send({
@@ -1001,40 +1024,31 @@ function startMessageChecker() {
     }, 30000);
 }
 
-async function clearOldBlobUrls() {
-    // Очищаем localStorage от старых blob URL
-    try {
-        const encryptedData = localStorage.getItem('chats_data');
-        if (encryptedData) {
-            const key = await generateKey();
-            const decrypted = await decryptData(JSON.parse(encryptedData), key);
-            let needUpdate = false;
-            
-            for (const [username, chatData] of decrypted) {
-                if (chatData.avatar && !chatData.avatar.startsWith('data:') && !chatData.avatar.startsWith('http')) {
-                    console.log('Найден устаревший blob URL для:', username);
-                    chatData.avatar = await loadUserAvatar(username, null);
-                    needUpdate = true;
-                }
-            }
-            
-            if (needUpdate) {
-                const newEncrypted = await encryptData(decrypted, key);
-                localStorage.setItem('chats_data', JSON.stringify(newEncrypted));
-                console.log('Очищены устаревшие blob URL');
-            }
-        }
-    } catch (error) {
-        console.error('Ошибка очистки blob URL:', error);
+async function clearAndReloadAvatars() {
+    console.log('Очищаем кэш аватарок...');
+    for (const [username, chatData] of chats) {
+        console.log('Перезагружаем аватар для:', username);
+        const newAvatar = await loadUserAvatar(username, null);
+        chatData.avatar = newAvatar;
     }
+    if (currentUser) {
+        currentUser.avatarDataUrl = await loadUserAvatar(currentUser.username, currentUser.photo);
+        const avatarImg = document.getElementById('currentUserAvatar');
+        if (avatarImg) {
+            avatarImg.src = currentUser.avatarDataUrl;
+        }
+    }
+    await saveToLocalStorage();
+    await refreshChatsList();
+    console.log('Аватарки обновлены');
 }
 
 async function init() {
-    await clearOldBlobUrls();
     await loadCurrentUser();
     await loadChats();
     await initPeer();
     await syncChatsFromServer();
+    await clearAndReloadAvatars();
     updateUI();
     setupEventListeners();
     startMessageChecker();
