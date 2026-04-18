@@ -4,6 +4,7 @@ let peer = null;
 let connections = new Map();
 let chats = new Map();
 let encryptionKey = null;
+let offlineCheckInterval = null;
 
 const peerConfig = {
     config: {
@@ -27,45 +28,6 @@ function getPeerId(username) {
 
 function getInitials(username) {
     return username.charAt(0).toUpperCase();
-}
-
-function showLoadingSpinner(element) {
-    if (!element) return;
-    const parent = element.parentElement;
-    if (!parent) return;
-    
-    const spinnerContainer = document.createElement('div');
-    spinnerContainer.className = 'avatar-spinner';
-    spinnerContainer.style.cssText = 'position: absolute; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.1); border-radius: 50%;';
-    
-    const spinner = document.createElement('div');
-    spinner.style.width = '20px';
-    spinner.style.height = '20px';
-    spinner.style.border = '2px solid rgba(102, 126, 234, 0.3)';
-    spinner.style.borderTop = '2px solid #667eea';
-    spinner.style.borderRadius = '50%';
-    spinner.style.animation = 'spin 1s linear infinite';
-    
-    const style = document.createElement('style');
-    style.textContent = '@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }';
-    if (!document.querySelector('#avatar-spinner-style')) {
-        style.id = 'avatar-spinner-style';
-        document.head.appendChild(style);
-    }
-    
-    spinnerContainer.appendChild(spinner);
-    
-    element.style.position = 'relative';
-    element.appendChild(spinnerContainer);
-}
-
-function hideLoadingSpinner(element) {
-    if (!element) return;
-    const spinner = element.querySelector('.avatar-spinner');
-    if (spinner) {
-        spinner.remove();
-    }
-    element.style.position = '';
 }
 
 async function loadUserAvatar(username, photoUrl) {
@@ -121,33 +83,6 @@ async function loadUserAvatar(username, photoUrl) {
     return null;
 }
 
-async function loadUserAvatarOnce(username, photoUrl, avatarElement) {
-    if (!photoUrl || !avatarElement) return false;
-    
-    if (avatarElement) {
-        showLoadingSpinner(avatarElement);
-    }
-    
-    const avatarDataUrl = await loadUserAvatar(username, photoUrl);
-    
-    if (avatarElement) {
-        hideLoadingSpinner(avatarElement);
-    }
-    
-    if (avatarDataUrl) {
-        if (avatarElement) {
-            avatarElement.src = avatarDataUrl;
-            avatarElement.style.display = 'block';
-        }
-        return true;
-    } else {
-        if (avatarElement) {
-            avatarElement.style.display = 'none';
-        }
-        return false;
-    }
-}
-
 async function loadCurrentUser() {
     try {
         const response = await fetch('https://www.uran-chat.space/get_session.php');
@@ -164,7 +99,11 @@ async function loadCurrentUser() {
             
             const avatarImg = document.getElementById('currentUserAvatar');
             if (avatarImg && currentUser.photo) {
-                await loadUserAvatarOnce(currentUser.username, currentUser.photo, avatarImg);
+                const avatarDataUrl = await loadUserAvatar(currentUser.username, currentUser.photo);
+                if (avatarDataUrl) {
+                    avatarImg.src = avatarDataUrl;
+                    avatarImg.style.display = 'block';
+                }
             }
         } else {
             throw new Error('No session found');
@@ -206,6 +145,13 @@ function initPeer() {
             updateConnectionStatus(true);
             
             await checkOfflineMessages();
+            
+            if (offlineCheckInterval) {
+                clearInterval(offlineCheckInterval);
+            }
+            offlineCheckInterval = setInterval(async () => {
+                await checkOfflineMessages();
+            }, 5000);
             
             resolve();
         });
@@ -694,6 +640,17 @@ async function fetchUserInfo(username) {
     }
 }
 
+async function loadChatAvatar(username, photoUrl, avatarElement) {
+    if (!photoUrl || !avatarElement) return;
+    
+    const avatarDataUrl = await loadUserAvatar(username, photoUrl);
+    if (avatarDataUrl) {
+        avatarElement.src = avatarDataUrl;
+        avatarElement.style.display = 'block';
+        avatarElement.style.objectFit = 'cover';
+    }
+}
+
 async function addNewChat(chatWith) {
     if (!currentUser) return false;
     
@@ -784,6 +741,14 @@ async function refreshChatsList() {
     for (const [username, chatData] of sortedChats) {
         const chatItem = createChatItem(username, chatData);
         chatsList.appendChild(chatItem);
+        
+        const userInfo = await fetchUserInfo(username);
+        if (userInfo.photo) {
+            const avatarImg = chatItem.querySelector('.chat-avatar-img');
+            if (avatarImg) {
+                loadChatAvatar(username, userInfo.photo, avatarImg);
+            }
+        }
     }
     
     if (chats.size === 0) {
@@ -798,14 +763,31 @@ function createChatItem(username, chatData) {
     
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
-    avatarDiv.textContent = getInitials(username);
+    avatarDiv.style.position = 'relative';
+    avatarDiv.style.width = '50px';
+    avatarDiv.style.height = '50px';
+    avatarDiv.style.borderRadius = '50%';
+    avatarDiv.style.overflow = 'hidden';
     avatarDiv.style.display = 'flex';
     avatarDiv.style.alignItems = 'center';
     avatarDiv.style.justifyContent = 'center';
-    avatarDiv.style.fontSize = '20px';
-    avatarDiv.style.fontWeight = 'bold';
     avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
     avatarDiv.style.color = 'white';
+    
+    const avatarImg = document.createElement('img');
+    avatarImg.className = 'chat-avatar-img';
+    avatarImg.style.width = '100%';
+    avatarImg.style.height = '100%';
+    avatarImg.style.objectFit = 'cover';
+    avatarImg.style.display = 'none';
+    avatarDiv.appendChild(avatarImg);
+    
+    const initialsSpan = document.createElement('span');
+    initialsSpan.className = 'chat-avatar-initials';
+    initialsSpan.textContent = getInitials(username);
+    initialsSpan.style.fontSize = '20px';
+    initialsSpan.style.fontWeight = 'bold';
+    avatarDiv.appendChild(initialsSpan);
     
     const infoDiv = document.createElement('div');
     infoDiv.className = 'chat-info';
@@ -857,6 +839,26 @@ function openChat(username) {
         headerAvatar.style.fontWeight = 'bold';
         headerAvatar.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
         headerAvatar.style.color = 'white';
+        headerAvatar.style.width = '45px';
+        headerAvatar.style.height = '45px';
+        headerAvatar.style.borderRadius = '50%';
+        
+        fetchUserInfo(username).then(userInfo => {
+            if (userInfo.photo) {
+                loadUserAvatar(username, userInfo.photo).then(avatarDataUrl => {
+                    if (avatarDataUrl) {
+                        headerAvatar.innerHTML = '';
+                        const img = document.createElement('img');
+                        img.src = avatarDataUrl;
+                        img.style.width = '100%';
+                        img.style.height = '100%';
+                        img.style.borderRadius = '50%';
+                        img.style.objectFit = 'cover';
+                        headerAvatar.appendChild(img);
+                    }
+                });
+            }
+        });
     }
     if (messageInput) messageInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
