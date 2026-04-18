@@ -5,7 +5,6 @@ let connections = new Map();
 let chats = new Map();
 let encryptionKey = null;
 let pendingMessages = new Map();
-let chatKeys = new Map();
 
 const peerConfig = {
     config: {
@@ -29,76 +28,6 @@ function getPeerId(username) {
 
 function getInitials(username) {
     return username.charAt(0).toUpperCase();
-}
-
-async function generateChatKey(chatWith) {
-    const key = await crypto.subtle.generateKey(
-        { name: 'AES-GCM', length: 256 },
-        true,
-        ['encrypt', 'decrypt']
-    );
-    
-    const exportedKey = await crypto.subtle.exportKey('jwk', key);
-    
-    const keys = JSON.parse(localStorage.getItem('chat_keys') || '{}');
-    keys[chatWith] = exportedKey;
-    localStorage.setItem('chat_keys', JSON.stringify(keys));
-    
-    chatKeys.set(chatWith, key);
-    return key;
-}
-
-async function getChatKey(chatWith) {
-    if (chatKeys.has(chatWith)) {
-        return chatKeys.get(chatWith);
-    }
-    
-    const keys = JSON.parse(localStorage.getItem('chat_keys') || '{}');
-    const storedKey = keys[chatWith];
-    
-    if (storedKey) {
-        const key = await crypto.subtle.importKey(
-            'jwk',
-            storedKey,
-            { name: 'AES-GCM' },
-            false,
-            ['encrypt', 'decrypt']
-        );
-        chatKeys.set(chatWith, key);
-        return key;
-    }
-    return null;
-}
-
-async function encryptMessage(message, key) {
-    const encoder = new TextEncoder();
-    const dataBuffer = encoder.encode(message);
-    
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: iv },
-        key,
-        dataBuffer
-    );
-    
-    return {
-        iv: Array.from(iv),
-        data: Array.from(new Uint8Array(encrypted))
-    };
-}
-
-async function decryptMessage(encryptedData, key) {
-    const iv = new Uint8Array(encryptedData.iv);
-    const data = new Uint8Array(encryptedData.data);
-    
-    const decrypted = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: iv },
-        key,
-        data
-    );
-    
-    const decoder = new TextDecoder();
-    return decoder.decode(decrypted);
 }
 
 async function loadUserAvatar(username, photoUrl) {
@@ -291,7 +220,7 @@ function setupConnection(conn) {
                 conn.send({
                     type: 'message',
                     from: currentUser?.username,
-                    encryptedData: msg.encryptedData,
+                    text: msg.text,
                     time: msg.time,
                     messageId: msg.id
                 });
@@ -327,9 +256,6 @@ async function handleIncomingMessage(peerId, data) {
         case 'user_info':
             await saveUserInfo(peerId, data);
             break;
-        case 'chat_key':
-            await receiveChatKey(peerId, data);
-            break;
         case 'typing':
             if (data.isTyping) {
                 updateTypingStatus(peerId, data.isTyping);
@@ -338,142 +264,13 @@ async function handleIncomingMessage(peerId, data) {
     }
 }
 
-async function receiveChatKey(peerId, data) {
-    if (!data.chatWith || !data.encryptedKey) return;
-    
-    const username = data.chatWith;
-    
-    try {
-        const privateKey = await getPrivateKey();
-        const decryptedKeyData = await decryptWithPrivateKey(data.encryptedKey, privateKey);
-        const key = await crypto.subtle.importKey(
-            'jwk',
-            decryptedKeyData,
-            { name: 'AES-GCM' },
-            false,
-            ['encrypt', 'decrypt']
-        );
-        
-        chatKeys.set(username, key);
-        const keys = JSON.parse(localStorage.getItem('chat_keys') || '{}');
-        keys[username] = decryptedKeyData;
-        localStorage.setItem('chat_keys', JSON.stringify(keys));
-        
-        console.log('Получен ключ для чата с:', username);
-    } catch (error) {
-        console.error('Ошибка получения ключа:', error);
-    }
-}
-
-async function sendChatKey(to, chatWith, key) {
-    const conn = connections.get(getPeerId(to));
-    if (!conn || !conn.open) return;
-    
-    const publicKey = await getPublicKey(to);
-    if (!publicKey) return;
-    
-    const exportedKey = await crypto.subtle.exportKey('jwk', key);
-    const encryptedKey = await encryptWithPublicKey(exportedKey, publicKey);
-    
-    conn.send({
-        type: 'chat_key',
-        chatWith: chatWith,
-        encryptedKey: encryptedKey
-    });
-}
-
-async function getPrivateKey() {
-    let privateKey = localStorage.getItem('private_key');
-    if (!privateKey) {
-        const keyPair = await crypto.subtle.generateKey(
-            {
-                name: 'RSA-OAEP',
-                modulusLength: 2048,
-                publicExponent: new Uint8Array([1, 0, 1]),
-                hash: 'SHA-256'
-            },
-            true,
-            ['encrypt', 'decrypt']
-        );
-        
-        const exportedPrivate = await crypto.subtle.exportKey('jwk', keyPair.privateKey);
-        const exportedPublic = await crypto.subtle.exportKey('jwk', keyPair.publicKey);
-        
-        localStorage.setItem('private_key', JSON.stringify(exportedPrivate));
-        localStorage.setItem('public_key', JSON.stringify(exportedPublic));
-        
-        return keyPair.privateKey;
-    }
-    
-    return await crypto.subtle.importKey(
-        'jwk',
-        JSON.parse(privateKey),
-        { name: 'RSA-OAEP', hash: 'SHA-256' },
-        false,
-        ['decrypt']
-    );
-}
-
-async function getPublicKey(username) {
-    const publicKeyData = localStorage.getItem(`public_key_${username}`);
-    if (publicKeyData) {
-        return await crypto.subtle.importKey(
-            'jwk',
-            JSON.parse(publicKeyData),
-            { name: 'RSA-OAEP', hash: 'SHA-256' },
-            false,
-            ['encrypt']
-        );
-    }
-    return null;
-}
-
-async function encryptWithPublicKey(data, publicKey) {
-    const encoder = new TextEncoder();
-    const encoded = encoder.encode(JSON.stringify(data));
-    const encrypted = await crypto.subtle.encrypt(
-        { name: 'RSA-OAEP' },
-        publicKey,
-        encoded
-    );
-    return Array.from(new Uint8Array(encrypted));
-}
-
-async function decryptWithPrivateKey(encryptedData, privateKey) {
-    const encrypted = new Uint8Array(encryptedData);
-    const decrypted = await crypto.subtle.decrypt(
-        { name: 'RSA-OAEP' },
-        privateKey,
-        encrypted
-    );
-    const decoder = new TextDecoder();
-    return JSON.parse(decoder.decode(decrypted));
-}
-
 async function receiveMessage(peerId, data) {
-    if (!currentUser || !data.from) return;
+    if (!currentUser || !data.from || !data.text) return;
     
     const senderUsername = data.from;
-    
-    let decryptedText = null;
-    const chatKey = await getChatKey(senderUsername);
-    
-    if (chatKey && data.encryptedData) {
-        try {
-            decryptedText = await decryptMessage(data.encryptedData, chatKey);
-        } catch (error) {
-            console.error('Ошибка расшифровки:', error);
-            decryptedText = '[Зашифрованное сообщение]';
-        }
-    } else if (data.text) {
-        decryptedText = data.text;
-    }
-    
-    if (!decryptedText) return;
-    
     const message = {
         id: data.messageId || Date.now(),
-        text: decryptedText,
+        text: data.text,
         time: data.time || new Date().toISOString(),
         sender: senderUsername,
         receiver: currentUser.username,
@@ -503,12 +300,10 @@ async function receiveMessage(peerId, data) {
 async function sendUserInfo(peerId) {
     const conn = connections.get(peerId);
     if (conn && conn.open && currentUser) {
-        const publicKey = localStorage.getItem('public_key');
         conn.send({
             type: 'user_info',
             username: currentUser.username,
-            photo: currentUser.photo,
-            publicKey: publicKey ? JSON.parse(publicKey) : null
+            photo: currentUser.photo
         });
     }
 }
@@ -517,10 +312,6 @@ async function saveUserInfo(peerId, data) {
     if (!data.username) return;
     
     const username = data.username;
-    
-    if (data.publicKey) {
-        localStorage.setItem(`public_key_${username}`, JSON.stringify(data.publicKey));
-    }
     
     if (!chats.has(username)) {
         const avatarDataUrl = await loadUserAvatar(username, data.photo || null);
@@ -532,28 +323,14 @@ async function saveUserInfo(peerId, data) {
         await saveToLocalStorage();
         await refreshChatsList();
     }
-    
-    let chatKey = await getChatKey(username);
-    if (!chatKey) {
-        chatKey = await generateChatKey(username);
-        await sendChatKey(username, username, chatKey);
-    }
 }
 
 async function sendMessage(text) {
     if (!currentChat || !text.trim() || !currentUser) return;
     
-    const chatKey = await getChatKey(currentChat);
-    let encryptedData = null;
-    
-    if (chatKey) {
-        encryptedData = await encryptMessage(text.trim(), chatKey);
-    }
-    
     const message = {
         id: Date.now(),
-        text: chatKey ? null : text.trim(),
-        encryptedData: encryptedData,
+        text: text.trim(),
         time: new Date().toISOString(),
         sender: currentUser.username,
         receiver: currentChat,
@@ -561,15 +338,8 @@ async function sendMessage(text) {
         isDelivered: false
     };
     
-    if (!chatKey) {
-        message.text = text.trim();
-    }
-    
     await saveMessage(currentChat, message);
-    displayMessage({
-        ...message,
-        text: text.trim()
-    });
+    displayMessage(message);
     
     const peerId = getPeerId(currentChat);
     const conn = connections.get(peerId);
@@ -578,7 +348,7 @@ async function sendMessage(text) {
         conn.send({
             type: 'message',
             from: currentUser.username,
-            encryptedData: encryptedData,
+            text: text.trim(),
             time: message.time,
             messageId: message.id
         });
@@ -590,7 +360,7 @@ async function sendMessage(text) {
         }
         pendingMessages.get(currentChat).push({
             id: message.id,
-            encryptedData: encryptedData,
+            text: text.trim(),
             time: message.time
         });
         await savePendingToLocalStorage();
@@ -629,21 +399,16 @@ function showMessageQueued(username, text) {
 
 async function savePendingToLocalStorage() {
     const pendingArray = Array.from(pendingMessages.entries());
-    const key = await generateMasterKey();
-    const encrypted = await encryptMasterData(pendingArray, key);
-    localStorage.setItem('pending_messages', JSON.stringify(encrypted));
+    localStorage.setItem('pending_messages', JSON.stringify(pendingArray));
 }
 
 async function loadPendingFromLocalStorage() {
-    const encryptedData = localStorage.getItem('pending_messages');
-    if (encryptedData) {
+    const storedData = localStorage.getItem('pending_messages');
+    if (storedData) {
         try {
-            const key = await generateMasterKey();
-            const decrypted = await decryptMasterData(JSON.parse(encryptedData), key);
-            pendingMessages = new Map(decrypted);
+            pendingMessages = new Map(JSON.parse(storedData));
         } catch (error) {
             console.error('Ошибка загрузки pending сообщений:', error);
-            localStorage.removeItem('pending_messages');
             pendingMessages = new Map();
         }
     }
@@ -668,15 +433,14 @@ async function saveMessage(chatWith, message) {
         chat.messages.push(message);
     }
     
-    const displayText = message.text || '[Зашифрованное сообщение]';
-    chat.lastMessage = displayText.substring(0, 50);
+    chat.lastMessage = message.text.substring(0, 50);
     chat.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
     
     await saveToLocalStorage();
-    updateLastMessage(chatWith, displayText);
+    updateLastMessage(chatWith, message.text);
 }
 
-async function encryptMasterData(data, key) {
+async function encryptData(data, key) {
     const encoder = new TextEncoder();
     const dataBuffer = encoder.encode(JSON.stringify(data));
     
@@ -693,7 +457,7 @@ async function encryptMasterData(data, key) {
     };
 }
 
-async function decryptMasterData(encryptedData, key) {
+async function decryptData(encryptedData, key) {
     const iv = new Uint8Array(encryptedData.iv);
     const data = new Uint8Array(encryptedData.data);
     
@@ -707,9 +471,9 @@ async function decryptMasterData(encryptedData, key) {
     return JSON.parse(decoder.decode(decrypted));
 }
 
-async function generateMasterKey() {
+async function generateKey() {
     if (!encryptionKey) {
-        const storedKey = localStorage.getItem('master_key');
+        const storedKey = localStorage.getItem('encryption_key');
         if (storedKey) {
             const keyData = JSON.parse(storedKey);
             encryptionKey = await crypto.subtle.importKey(
@@ -726,14 +490,14 @@ async function generateMasterKey() {
                 ['encrypt', 'decrypt']
             );
             const exportedKey = await crypto.subtle.exportKey('jwk', encryptionKey);
-            localStorage.setItem('master_key', JSON.stringify(exportedKey));
+            localStorage.setItem('encryption_key', JSON.stringify(exportedKey));
         }
     }
     return encryptionKey;
 }
 
 async function saveToLocalStorage() {
-    const key = await generateMasterKey();
+    const key = await generateKey();
     const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
         username,
         {
@@ -743,7 +507,7 @@ async function saveToLocalStorage() {
             source: chatData.source
         }
     ]);
-    const encrypted = await encryptMasterData(dataToSave, key);
+    const encrypted = await encryptData(dataToSave, key);
     localStorage.setItem('chats_data', JSON.stringify(encrypted));
 }
 
@@ -751,8 +515,8 @@ async function loadChats() {
     const encryptedData = localStorage.getItem('chats_data');
     if (encryptedData) {
         try {
-            const key = await generateMasterKey();
-            const decrypted = await decryptMasterData(JSON.parse(encryptedData), key);
+            const key = await generateKey();
+            const decrypted = await decryptData(JSON.parse(encryptedData), key);
             chats = new Map(decrypted);
             
             for (const [username, chatData] of chats) {
@@ -767,27 +531,11 @@ async function loadChats() {
             console.error('Ошибка расшифровки, очищаем старые данные:', error);
             localStorage.removeItem('chats_data');
             localStorage.removeItem('pending_messages');
-            localStorage.removeItem('master_key');
+            localStorage.removeItem('encryption_key');
             chats = new Map();
         }
     } else {
         chats = new Map();
-    }
-    
-    const keys = JSON.parse(localStorage.getItem('chat_keys') || '{}');
-    for (const [username, keyData] of Object.entries(keys)) {
-        try {
-            const key = await crypto.subtle.importKey(
-                'jwk',
-                keyData,
-                { name: 'AES-GCM' },
-                false,
-                ['encrypt', 'decrypt']
-            );
-            chatKeys.set(username, key);
-        } catch (error) {
-            console.error('Ошибка загрузки ключа для', username, error);
-        }
     }
     
     await loadPendingFromLocalStorage();
@@ -818,16 +566,6 @@ async function syncChatsFromServer() {
                         lastMessage: '',
                         source: result.my_chats?.includes(chatUsername) ? 'me' : 'another'
                     });
-                    
-                    let chatKey = await getChatKey(chatUsername);
-                    if (!chatKey) {
-                        chatKey = await generateChatKey(chatUsername);
-                        const peerId = getPeerId(chatUsername);
-                        const conn = connections.get(peerId);
-                        if (conn && conn.open) {
-                            await sendChatKey(chatUsername, chatUsername, chatKey);
-                        }
-                    }
                 }
             }
             
@@ -881,16 +619,8 @@ async function addNewChat(chatWith) {
             await saveToLocalStorage();
         }
         
-        let chatKey = await getChatKey(chatWith);
-        if (!chatKey) {
-            chatKey = await generateChatKey(chatWith);
-        }
-        
         await refreshChatsList();
-        const conn = await connectToUser(chatWith);
-        if (conn && conn.open) {
-            await sendChatKey(chatWith, chatWith, chatKey);
-        }
+        await connectToUser(chatWith);
         return true;
     } else {
         alert('Ошибка: ' + (result.error || 'Не удалось создать чат'));
@@ -1099,13 +829,7 @@ function displayChatMessages(username) {
     
     const chat = chats.get(username);
     if (chat && chat.messages) {
-        chat.messages.forEach(msg => {
-            let displayText = msg.text;
-            if (!displayText && msg.encryptedData) {
-                displayText = '[Зашифрованное сообщение]';
-            }
-            displayMessage({ ...msg, text: displayText });
-        });
+        chat.messages.forEach(msg => displayMessage(msg));
     }
     
     container.scrollTop = container.scrollHeight;
@@ -1176,7 +900,7 @@ function updateConnectionStatus(isConnected) {
 }
 
 function updateUserStatus(peerId, isOnline) {
-    for (const [username, chatData] of chats) {
+    for (const [username] of chats) {
         if (getPeerId(username) === peerId && currentChat === username) {
             updateConnectionStatus(isOnline);
             break;
@@ -1185,20 +909,22 @@ function updateUserStatus(peerId, isOnline) {
 }
 
 function updateTypingStatus(peerId, isTyping) {
-    for (const [username, chatData] of chats) {
-        if (getPeerId(username) === peerId && currentChat === username) {
+    for (const [username] of chats) {
+        if (getPeerId(username) === peerId && currentChat === username && isTyping) {
             const statusDiv = document.getElementById('chatHeaderStatus');
-            if (statusDiv && isTyping) {
+            if (statusDiv) {
                 statusDiv.textContent = 'Печатает...';
                 statusDiv.style.color = '#ff9800';
                 setTimeout(() => {
-                    const conn = connections.get(peerId);
-                    if (conn && conn.open) {
-                        statusDiv.textContent = 'Онлайн';
-                        statusDiv.style.color = '#4caf50';
-                    } else {
-                        statusDiv.textContent = 'Оффлайн';
-                        statusDiv.style.color = '#f44336';
+                    if (currentChat === username) {
+                        const conn = connections.get(peerId);
+                        if (conn && conn.open) {
+                            statusDiv.textContent = 'Онлайн';
+                            statusDiv.style.color = '#4caf50';
+                        } else {
+                            statusDiv.textContent = 'Оффлайн';
+                            statusDiv.style.color = '#f44336';
+                        }
                     }
                 }, 2000);
             }
@@ -1295,7 +1021,7 @@ function startMessageChecker() {
         for (const [peerId, conn] of connections) {
             if (!conn.open) {
                 connections.delete(peerId);
-                for (const [username, chatData] of chats) {
+                for (const [username] of chats) {
                     if (getPeerId(username) === peerId && currentChat === username) {
                         updateConnectionStatus(false);
                         break;
@@ -1313,7 +1039,7 @@ function startMessageChecker() {
                         conn.send({
                             type: 'message',
                             from: currentUser.username,
-                            encryptedData: msg.encryptedData,
+                            text: msg.text,
                             time: msg.time,
                             messageId: msg.id
                         });
