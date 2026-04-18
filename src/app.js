@@ -31,57 +31,41 @@ function getInitials(username) {
 
 function showLoadingSpinner(element) {
     if (!element) return;
-    element.innerHTML = '';
-    element.style.display = 'flex';
-    element.style.alignItems = 'center';
-    element.style.justifyContent = 'center';
+    const parent = element.parentElement;
+    if (!parent) return;
+    
+    const spinnerContainer = document.createElement('div');
+    spinnerContainer.className = 'avatar-spinner';
+    spinnerContainer.style.cssText = 'position: absolute; width: 100%; height: 100%; display: flex; align-items: center; justify-content: center; background: rgba(0,0,0,0.1); border-radius: 50%;';
     
     const spinner = document.createElement('div');
-    spinner.style.width = '30px';
-    spinner.style.height = '30px';
-    spinner.style.border = '3px solid rgba(102, 126, 234, 0.3)';
-    spinner.style.borderTop = '3px solid #667eea';
+    spinner.style.width = '20px';
+    spinner.style.height = '20px';
+    spinner.style.border = '2px solid rgba(102, 126, 234, 0.3)';
+    spinner.style.borderTop = '2px solid #667eea';
     spinner.style.borderRadius = '50%';
     spinner.style.animation = 'spin 1s linear infinite';
     
     const style = document.createElement('style');
     style.textContent = '@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }';
-    document.head.appendChild(style);
+    if (!document.querySelector('#avatar-spinner-style')) {
+        style.id = 'avatar-spinner-style';
+        document.head.appendChild(style);
+    }
     
-    element.appendChild(spinner);
+    spinnerContainer.appendChild(spinner);
+    
+    element.style.position = 'relative';
+    element.appendChild(spinnerContainer);
 }
 
 function hideLoadingSpinner(element) {
     if (!element) return;
-    element.innerHTML = '';
-    element.style.display = '';
-}
-
-async function loadUserAvatarWithRetry(username, photoUrl, maxRetries = Infinity, delay = 2000) {
-    let attempt = 0;
-    
-    while (attempt < maxRetries) {
-        attempt++;
-        console.log(`Попытка ${attempt} загрузки фото для ${username}`);
-        
-        try {
-            const result = await loadUserAvatar(username, photoUrl);
-            if (result) {
-                console.log(`Фото загружено для ${username} после ${attempt} попыток`);
-                return result;
-            }
-        } catch (error) {
-            console.error(`Ошибка загрузки фото ${username}, попытка ${attempt}:`, error);
-        }
-        
-        if (attempt < maxRetries) {
-            console.log(`Повторная попытка через ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-        }
+    const spinner = element.querySelector('.avatar-spinner');
+    if (spinner) {
+        spinner.remove();
     }
-    
-    console.error(`Не удалось загрузить фото для ${username} после ${attempt} попыток`);
-    return null;
+    element.style.position = '';
 }
 
 async function loadUserAvatar(username, photoUrl) {
@@ -96,7 +80,11 @@ async function loadUserAvatar(username, photoUrl) {
             const zipUrl = `https://www.uran-chat.space/user_photo.php?user=${userHash}`;
             
             const response = await fetch(zipUrl);
-            if (!response.ok) throw new Error('Failed to fetch photo');
+            
+            if (!response.ok) {
+                console.error(`Ошибка HTTP ${response.status} для ${username}`);
+                return null;
+            }
             
             const blob = await response.blob();
             
@@ -133,6 +121,33 @@ async function loadUserAvatar(username, photoUrl) {
     return null;
 }
 
+async function loadUserAvatarOnce(username, photoUrl, avatarElement) {
+    if (!photoUrl || !avatarElement) return false;
+    
+    if (avatarElement) {
+        showLoadingSpinner(avatarElement);
+    }
+    
+    const avatarDataUrl = await loadUserAvatar(username, photoUrl);
+    
+    if (avatarElement) {
+        hideLoadingSpinner(avatarElement);
+    }
+    
+    if (avatarDataUrl) {
+        if (avatarElement) {
+            avatarElement.src = avatarDataUrl;
+            avatarElement.style.display = 'block';
+        }
+        return true;
+    } else {
+        if (avatarElement) {
+            avatarElement.style.display = 'none';
+        }
+        return false;
+    }
+}
+
 async function loadCurrentUser() {
     try {
         const response = await fetch('https://www.uran-chat.space/get_session.php');
@@ -149,18 +164,7 @@ async function loadCurrentUser() {
             
             const avatarImg = document.getElementById('currentUserAvatar');
             if (avatarImg && currentUser.photo) {
-                showLoadingSpinner(avatarImg);
-                
-                const avatarDataUrl = await loadUserAvatarWithRetry(currentUser.username, currentUser.photo);
-                if (avatarDataUrl) {
-                    currentUser.avatarDataUrl = avatarDataUrl;
-                    hideLoadingSpinner(avatarImg);
-                    avatarImg.src = avatarDataUrl;
-                    avatarImg.style.display = 'block';
-                } else {
-                    hideLoadingSpinner(avatarImg);
-                    avatarImg.style.display = 'none';
-                }
+                await loadUserAvatarOnce(currentUser.username, currentUser.photo, avatarImg);
             }
         } else {
             throw new Error('No session found');
@@ -172,10 +176,6 @@ async function loadCurrentUser() {
             username: 'DemoUser' + Math.floor(Math.random() * 1000),
             photo: null
         };
-        const avatarImg = document.getElementById('currentUserAvatar');
-        if (avatarImg) {
-            avatarImg.style.display = 'none';
-        }
     }
     
     const usernameSpan = document.getElementById('currentUsername');
@@ -323,15 +323,15 @@ async function checkOfflineMessages() {
             
             if (!chats.has(sender)) {
                 const userInfo = await fetchUserInfo(sender);
-                const avatarDataUrl = userInfo.photo ? await loadUserAvatarWithRetry(sender, userInfo.photo) : null;
                 chats.set(sender, {
                     messages: [],
-                    avatar: avatarDataUrl,
+                    avatar: null,
                     lastMessage: ''
                 });
             }
         }
         
+        await saveToLocalStorage();
         await refreshChatsList();
         playNotification();
     }
@@ -425,10 +425,9 @@ async function saveUserInfo(peerId, data) {
     const username = data.username;
     
     if (!chats.has(username)) {
-        const avatarDataUrl = data.photo ? await loadUserAvatarWithRetry(username, data.photo) : null;
         chats.set(username, {
             messages: [],
-            avatar: avatarDataUrl,
+            avatar: null,
             lastMessage: ''
         });
         await saveToLocalStorage();
@@ -532,10 +531,9 @@ function showMessageQueued(username, text) {
 
 async function saveMessage(chatWith, message) {
     if (!chats.has(chatWith)) {
-        const avatarDataUrl = await loadUserAvatarWithRetry(chatWith, null);
         chats.set(chatWith, {
             messages: [],
-            avatar: avatarDataUrl,
+            avatar: null,
             lastMessage: ''
         });
     }
@@ -613,18 +611,23 @@ async function generateKey() {
 }
 
 async function saveToLocalStorage() {
-    const key = await generateKey();
-    const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
-        username,
-        {
-            messages: chatData.messages,
-            avatar: chatData.avatar,
-            lastMessage: chatData.lastMessage,
-            source: chatData.source
-        }
-    ]);
-    const encrypted = await encryptData(dataToSave, key);
-    localStorage.setItem('chats_data', JSON.stringify(encrypted));
+    try {
+        const key = await generateKey();
+        const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
+            username,
+            {
+                messages: chatData.messages,
+                avatar: chatData.avatar,
+                lastMessage: chatData.lastMessage,
+                source: chatData.source
+            }
+        ]);
+        const encrypted = await encryptData(dataToSave, key);
+        localStorage.setItem('chats_data', JSON.stringify(encrypted));
+        console.log('Данные сохранены в localStorage');
+    } catch (error) {
+        console.error('Ошибка сохранения в localStorage:', error);
+    }
 }
 
 async function loadChats() {
@@ -634,22 +637,14 @@ async function loadChats() {
             const key = await generateKey();
             const decrypted = await decryptData(JSON.parse(encryptedData), key);
             chats = new Map(decrypted);
-            
-            for (const [username, chatData] of chats) {
-                if (!chatData.avatar || !chatData.avatar.startsWith('data:')) {
-                    const newAvatar = await loadUserAvatarWithRetry(username, null);
-                    chatData.avatar = newAvatar;
-                }
-            }
-            await saveToLocalStorage();
+            console.log(`Загружено ${chats.size} чатов из localStorage`);
         } catch (error) {
-            console.error('Ошибка расшифровки, очищаем старые данные:', error);
-            localStorage.removeItem('chats_data');
-            localStorage.removeItem('encryption_key');
+            console.error('Ошибка расшифровки:', error);
             chats = new Map();
         }
     } else {
         chats = new Map();
+        console.log('Нет сохраненных чатов');
     }
 }
 
@@ -671,10 +666,9 @@ async function syncChatsFromServer() {
             for (const chatUsername of result.chats) {
                 if (!chats.has(chatUsername)) {
                     const userInfo = await fetchUserInfo(chatUsername);
-                    const avatarDataUrl = userInfo.photo ? await loadUserAvatarWithRetry(chatUsername, userInfo.photo) : null;
                     chats.set(chatUsername, {
                         messages: [],
-                        avatar: avatarDataUrl,
+                        avatar: null,
                         lastMessage: '',
                         source: result.my_chats?.includes(chatUsername) ? 'me' : 'another'
                     });
@@ -721,10 +715,9 @@ async function addNewChat(chatWith) {
     if (result.success) {
         if (!chats.has(chatWith)) {
             const userInfo = await fetchUserInfo(chatWith);
-            const avatarDataUrl = userInfo.photo ? await loadUserAvatarWithRetry(chatWith, userInfo.photo) : null;
             chats.set(chatWith, {
                 messages: [],
-                avatar: avatarDataUrl,
+                avatar: null,
                 lastMessage: '',
                 source: 'me'
             });
@@ -768,14 +761,6 @@ function updateUI() {
         if (usernameSpan) {
             usernameSpan.textContent = currentUser.username;
         }
-        
-        if (currentUser.avatarDataUrl) {
-            const avatarImg = document.getElementById('currentUserAvatar');
-            if (avatarImg) {
-                avatarImg.src = currentUser.avatarDataUrl;
-                avatarImg.style.display = 'block';
-            }
-        }
     }
     
     refreshChatsList();
@@ -813,25 +798,14 @@ function createChatItem(username, chatData) {
     
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
-    
-    if (chatData.avatar && chatData.avatar.startsWith('data:')) {
-        const img = document.createElement('img');
-        img.src = chatData.avatar;
-        img.style.width = '100%';
-        img.style.height = '100%';
-        img.style.borderRadius = '50%';
-        img.style.objectFit = 'cover';
-        avatarDiv.appendChild(img);
-    } else {
-        avatarDiv.textContent = getInitials(username);
-        avatarDiv.style.display = 'flex';
-        avatarDiv.style.alignItems = 'center';
-        avatarDiv.style.justifyContent = 'center';
-        avatarDiv.style.fontSize = '20px';
-        avatarDiv.style.fontWeight = 'bold';
-        avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-        avatarDiv.style.color = 'white';
-    }
+    avatarDiv.textContent = getInitials(username);
+    avatarDiv.style.display = 'flex';
+    avatarDiv.style.alignItems = 'center';
+    avatarDiv.style.justifyContent = 'center';
+    avatarDiv.style.fontSize = '20px';
+    avatarDiv.style.fontWeight = 'bold';
+    avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    avatarDiv.style.color = 'white';
     
     const infoDiv = document.createElement('div');
     infoDiv.className = 'chat-info';
@@ -875,26 +849,14 @@ function openChat(username) {
     if (headerName) headerName.textContent = username;
     if (headerAvatar) {
         headerAvatar.innerHTML = '';
-        
-        const chat = chats.get(username);
-        if (chat && chat.avatar && chat.avatar.startsWith('data:')) {
-            const avatarImg = document.createElement('img');
-            avatarImg.src = chat.avatar;
-            avatarImg.style.width = '45px';
-            avatarImg.style.height = '45px';
-            avatarImg.style.borderRadius = '50%';
-            avatarImg.style.objectFit = 'cover';
-            headerAvatar.appendChild(avatarImg);
-        } else {
-            headerAvatar.textContent = getInitials(username);
-            headerAvatar.style.display = 'flex';
-            headerAvatar.style.alignItems = 'center';
-            headerAvatar.style.justifyContent = 'center';
-            headerAvatar.style.fontSize = '20px';
-            headerAvatar.style.fontWeight = 'bold';
-            headerAvatar.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-            headerAvatar.style.color = 'white';
-        }
+        headerAvatar.textContent = getInitials(username);
+        headerAvatar.style.display = 'flex';
+        headerAvatar.style.alignItems = 'center';
+        headerAvatar.style.justifyContent = 'center';
+        headerAvatar.style.fontSize = '20px';
+        headerAvatar.style.fontWeight = 'bold';
+        headerAvatar.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+        headerAvatar.style.color = 'white';
     }
     if (messageInput) messageInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
