@@ -4,6 +4,7 @@ let peer = null;
 let connections = new Map();
 let chats = new Map();
 let encryptionKey = null;
+let offlineCheckInterval = null;
 
 const peerConfig = {
     config: {
@@ -27,6 +28,105 @@ function getPeerId(username) {
 
 function getInitials(username) {
     return username.charAt(0).toUpperCase();
+}
+
+async function saveOfflineMessageToFTP(receiver, sender, message) {
+    try {
+        const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=save&receiver=${encodeURIComponent(receiver)}&sender=${encodeURIComponent(sender)}&message=${encodeURIComponent(JSON.stringify(message))}`
+        });
+        const result = await response.json();
+        return result.success;
+    } catch (error) {
+        console.error('Ошибка сохранения офлайн сообщения:', error);
+        return false;
+    }
+}
+
+async function getOfflineMessagesFromFTP(receiver, sender = null) {
+    try {
+        const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=get&receiver=${encodeURIComponent(receiver)}&sender=${encodeURIComponent(sender || '')}`
+        });
+        const result = await response.json();
+        return result.success ? result.messages : [];
+    } catch (error) {
+        console.error('Ошибка получения офлайн сообщений:', error);
+        return [];
+    }
+}
+
+async function deleteOfflineMessagesFromFTP(receiver, sender) {
+    try {
+        const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/x-www-form-urlencoded',
+            },
+            body: `action=delete&receiver=${encodeURIComponent(receiver)}&sender=${encodeURIComponent(sender)}`
+        });
+        const result = await response.json();
+        return result.success;
+    } catch (error) {
+        console.error('Ошибка удаления офлайн сообщений:', error);
+        return false;
+    }
+}
+
+async function checkOfflineMessages() {
+    if (!currentUser) return;
+    
+    console.log('Проверка офлайн сообщений...');
+    const offlineMessages = await getOfflineMessagesFromFTP(currentUser.username);
+    
+    if (offlineMessages && offlineMessages.length > 0) {
+        console.log(`Найдено ${offlineMessages.length} офлайн сообщений`);
+        
+        const messagesBySender = new Map();
+        for (const msg of offlineMessages) {
+            if (!messagesBySender.has(msg.sender)) {
+                messagesBySender.set(msg.sender, []);
+            }
+            messagesBySender.get(msg.sender).push(msg);
+        }
+        
+        for (const [sender, messages] of messagesBySender) {
+            for (const msg of messages) {
+                await saveMessage(sender, {
+                    id: msg.id,
+                    text: msg.text,
+                    time: msg.time,
+                    sender: msg.sender,
+                    receiver: currentUser.username,
+                    isRead: false,
+                    isDelivered: true
+                });
+            }
+            
+            await deleteOfflineMessagesFromFTP(currentUser.username, sender);
+            
+            if (!chats.has(sender)) {
+                const userInfo = await fetchUserInfo(sender);
+                chats.set(sender, {
+                    messages: [],
+                    avatar: null,
+                    lastMessage: ''
+                });
+            }
+        }
+        
+        await saveToLocalStorage();
+        await refreshChatsList();
+        playNotification();
+    }
 }
 
 async function loadUserAvatar(username, photoUrl) {
@@ -171,103 +271,6 @@ function initPeer() {
             setTimeout(() => peer?.reconnect(), 3000);
         });
     });
-}
-
-async function saveOfflineMessageToFTP(receiver, sender, message) {
-    try {
-        const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `action=save&receiver=${encodeURIComponent(receiver)}&sender=${encodeURIComponent(sender)}&message=${encodeURIComponent(JSON.stringify(message))}`
-        });
-        const result = await response.json();
-        return result.success;
-    } catch (error) {
-        console.error('Ошибка сохранения офлайн сообщения:', error);
-        return false;
-    }
-}
-
-async function getOfflineMessagesFromFTP(receiver, sender = null) {
-    try {
-        const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `action=get&receiver=${encodeURIComponent(receiver)}&sender=${encodeURIComponent(sender || '')}`
-        });
-        const result = await response.json();
-        return result.success ? result.messages : [];
-    } catch (error) {
-        console.error('Ошибка получения офлайн сообщений:', error);
-        return [];
-    }
-}
-
-async function deleteOfflineMessagesFromFTP(receiver, sender) {
-    try {
-        const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/x-www-form-urlencoded',
-            },
-            body: `action=delete&receiver=${encodeURIComponent(receiver)}&sender=${encodeURIComponent(sender)}`
-        });
-        const result = await response.json();
-        return result.success;
-    } catch (error) {
-        console.error('Ошибка удаления офлайн сообщений:', error);
-        return false;
-    }
-}
-
-async function checkOfflineMessagesForUser(sender) {
-    if (!currentUser || !sender) return false;
-    
-    console.log(`Проверка офлайн сообщений от ${sender}...`);
-    const offlineMessages = await getOfflineMessagesFromFTP(currentUser.username, sender);
-    
-    if (offlineMessages && offlineMessages.length > 0) {
-        console.log(`Найдено ${offlineMessages.length} офлайн сообщений от ${sender}`);
-        
-        for (const msg of offlineMessages) {
-            await saveMessage(sender, {
-                id: msg.id,
-                text: msg.text,
-                time: msg.time,
-                sender: msg.sender,
-                receiver: currentUser.username,
-                isRead: false,
-                isDelivered: true
-            });
-        }
-        
-        await deleteOfflineMessagesFromFTP(currentUser.username, sender);
-        
-        if (!chats.has(sender)) {
-            const userInfo = await fetchUserInfo(sender);
-            chats.set(sender, {
-                messages: [],
-                avatar: null,
-                lastMessage: ''
-            });
-        }
-        
-        await saveToLocalStorage();
-        await refreshChatsList();
-        
-        if (currentChat === sender) {
-            displayChatMessages(sender);
-        }
-        
-        playNotification();
-        return true;
-    }
-    
-    return false;
 }
 
 function setupConnection(conn) {
@@ -627,17 +630,6 @@ async function fetchUserInfo(username) {
     }
 }
 
-async function loadChatAvatar(username, photoUrl, avatarElement) {
-    if (!photoUrl || !avatarElement) return;
-    
-    const avatarDataUrl = await loadUserAvatar(username, photoUrl);
-    if (avatarDataUrl) {
-        avatarElement.src = avatarDataUrl;
-        avatarElement.style.display = 'block';
-        avatarElement.style.objectFit = 'cover';
-    }
-}
-
 async function addNewChat(chatWith) {
     if (!currentUser) return false;
     
@@ -696,19 +688,6 @@ async function connectToUser(username) {
     });
     
     setupConnection(conn);
-    
-    conn.on('error', async (err) => {
-        console.error(`Ошибка подключения к ${username}:`, err);
-        await checkOfflineMessagesForUser(username);
-    });
-    
-    setTimeout(async () => {
-        if (!conn.open) {
-            console.log(`Не удалось подключиться к ${username}, проверяем офлайн сообщения`);
-            await checkOfflineMessagesForUser(username);
-        }
-    }, 3000);
-    
     return conn;
 }
 
@@ -741,14 +720,6 @@ async function refreshChatsList() {
     for (const [username, chatData] of sortedChats) {
         const chatItem = createChatItem(username, chatData);
         chatsList.appendChild(chatItem);
-        
-        const userInfo = await fetchUserInfo(username);
-        if (userInfo.photo) {
-            const avatarImg = chatItem.querySelector('.chat-avatar-img');
-            if (avatarImg) {
-                loadChatAvatar(username, userInfo.photo, avatarImg);
-            }
-        }
     }
     
     if (chats.size === 0) {
@@ -868,10 +839,6 @@ function openChat(username) {
     const peerId = getPeerId(username);
     const conn = connections.get(peerId);
     updateConnectionStatus(conn && conn.open);
-    
-    if (!conn || !conn.open) {
-        checkOfflineMessagesForUser(username);
-    }
     
     const chat = chats.get(username);
     if (chat) {
@@ -1086,6 +1053,15 @@ function setupEventListeners() {
     }
 }
 
+function startOfflineMessageChecker() {
+    if (offlineCheckInterval) {
+        clearInterval(offlineCheckInterval);
+    }
+    offlineCheckInterval = setInterval(async () => {
+        await checkOfflineMessages();
+    }, 15000);
+}
+
 async function init() {
     await loadCurrentUser();
     await loadChats();
@@ -1093,6 +1069,7 @@ async function init() {
     await syncChatsFromServer();
     updateUI();
     setupEventListeners();
+    startOfflineMessageChecker();
 }
 
 init();
