@@ -4,7 +4,6 @@ let peer = null;
 let connections = new Map();
 let chats = new Map();
 let encryptionKey = null;
-let offlineCheckInterval = null;
 
 const peerConfig = {
     config: {
@@ -143,16 +142,6 @@ function initPeer() {
             clearTimeout(timeout);
             console.log('PeerJS подключен, ID:', id);
             updateConnectionStatus(true);
-            
-            await checkOfflineMessages();
-            
-            if (offlineCheckInterval) {
-                clearInterval(offlineCheckInterval);
-            }
-            offlineCheckInterval = setInterval(async () => {
-                await checkOfflineMessages();
-            }, 5000);
-            
             resolve();
         });
         
@@ -235,52 +224,50 @@ async function deleteOfflineMessagesFromFTP(receiver, sender) {
     }
 }
 
-async function checkOfflineMessages() {
-    if (!currentUser) return;
+async function checkOfflineMessagesForUser(sender) {
+    if (!currentUser || !sender) return false;
     
-    console.log('Проверка офлайн сообщений...');
-    const offlineMessages = await getOfflineMessagesFromFTP(currentUser.username);
+    console.log(`Проверка офлайн сообщений от ${sender}...`);
+    const offlineMessages = await getOfflineMessagesFromFTP(currentUser.username, sender);
     
     if (offlineMessages && offlineMessages.length > 0) {
-        console.log(`Найдено ${offlineMessages.length} офлайн сообщений`);
+        console.log(`Найдено ${offlineMessages.length} офлайн сообщений от ${sender}`);
         
-        const messagesBySender = new Map();
         for (const msg of offlineMessages) {
-            if (!messagesBySender.has(msg.sender)) {
-                messagesBySender.set(msg.sender, []);
-            }
-            messagesBySender.get(msg.sender).push(msg);
+            await saveMessage(sender, {
+                id: msg.id,
+                text: msg.text,
+                time: msg.time,
+                sender: msg.sender,
+                receiver: currentUser.username,
+                isRead: false,
+                isDelivered: true
+            });
         }
         
-        for (const [sender, messages] of messagesBySender) {
-            for (const msg of messages) {
-                await saveMessage(sender, {
-                    id: msg.id,
-                    text: msg.text,
-                    time: msg.time,
-                    sender: msg.sender,
-                    receiver: currentUser.username,
-                    isRead: false,
-                    isDelivered: true
-                });
-            }
-            
-            await deleteOfflineMessagesFromFTP(currentUser.username, sender);
-            
-            if (!chats.has(sender)) {
-                const userInfo = await fetchUserInfo(sender);
-                chats.set(sender, {
-                    messages: [],
-                    avatar: null,
-                    lastMessage: ''
-                });
-            }
+        await deleteOfflineMessagesFromFTP(currentUser.username, sender);
+        
+        if (!chats.has(sender)) {
+            const userInfo = await fetchUserInfo(sender);
+            chats.set(sender, {
+                messages: [],
+                avatar: null,
+                lastMessage: ''
+            });
         }
         
         await saveToLocalStorage();
         await refreshChatsList();
+        
+        if (currentChat === sender) {
+            displayChatMessages(sender);
+        }
+        
         playNotification();
+        return true;
     }
+    
+    return false;
 }
 
 function setupConnection(conn) {
@@ -421,7 +408,7 @@ async function sendMessage(text) {
     }
     
     if (!messageDelivered) {
-        console.log('PeerJS недоступен, сохраняем на FTP');
+        console.log(`Peer ${currentChat} недоступен, сохраняем на FTP`);
         await saveOfflineMessageToFTP(currentChat, currentUser.username, message);
         showMessageQueued(currentChat, text);
     }
@@ -457,7 +444,7 @@ function showMessageDelivered(username) {
 function showMessageQueued(username, text) {
     const statusDiv = document.getElementById('chatHeaderStatus');
     if (currentChat === username && statusDiv) {
-        statusDiv.textContent = 'Сообщение сохранено (доставим позже)';
+        statusDiv.textContent = 'Пользователь не в сети, сообщение сохранено';
         statusDiv.style.color = '#ff9800';
         setTimeout(() => {
             if (currentChat === username) {
@@ -709,6 +696,19 @@ async function connectToUser(username) {
     });
     
     setupConnection(conn);
+    
+    conn.on('error', async (err) => {
+        console.error(`Ошибка подключения к ${username}:`, err);
+        await checkOfflineMessagesForUser(username);
+    });
+    
+    setTimeout(async () => {
+        if (!conn.open) {
+            console.log(`Не удалось подключиться к ${username}, проверяем офлайн сообщения`);
+            await checkOfflineMessagesForUser(username);
+        }
+    }, 3000);
+    
     return conn;
 }
 
@@ -868,6 +868,10 @@ function openChat(username) {
     const peerId = getPeerId(username);
     const conn = connections.get(peerId);
     updateConnectionStatus(conn && conn.open);
+    
+    if (!conn || !conn.open) {
+        checkOfflineMessagesForUser(username);
+    }
     
     const chat = chats.get(username);
     if (chat) {
