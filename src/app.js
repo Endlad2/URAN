@@ -23,18 +23,8 @@ const peerConfig = {
     debug: 3
 };
 
-function generateRandomCode() {
-    return Math.floor(100000000000 + Math.random() * 900000000000).toString();
-}
-
 function getPeerId(username) {
-    const storedId = localStorage.getItem(`peer_id_${username}`);
-    if (storedId) {
-        return storedId;
-    }
-    const newId = `${generateRandomCode()}-${username}-uranchat`;
-    localStorage.setItem(`peer_id_${username}`, newId);
-    return newId;
+    return `${username}-uranchat`;
 }
 
 function getInitials(username) {
@@ -264,9 +254,11 @@ function initPeer() {
             updateConnectionStatus(false);
             
             if (err.type === 'unavailable-id' && peer) {
-                console.warn('ID занят, переподключаемся с другим ID');
+                console.warn('ID занят, переподключаемся...');
                 peer.destroy();
-                peer = new Peer(getPeerId(currentUser.username), peerConfig);
+                setTimeout(() => {
+                    peer = new Peer(peerId, peerConfig);
+                }, 1000);
             } else if (err.type === 'disconnected') {
                 setTimeout(() => peer?.reconnect(), 3000);
             }
@@ -651,6 +643,7 @@ async function loadPendingFromLocalStorage() {
             pendingMessages = new Map(decrypted);
         } catch (error) {
             console.error('Ошибка загрузки pending сообщений:', error);
+            localStorage.removeItem('pending_messages');
             pendingMessages = new Map();
         }
     }
@@ -771,7 +764,10 @@ async function loadChats() {
             }
             await saveToLocalStorage();
         } catch (error) {
-            console.error('Ошибка расшифровки:', error);
+            console.error('Ошибка расшифровки, очищаем старые данные:', error);
+            localStorage.removeItem('chats_data');
+            localStorage.removeItem('pending_messages');
+            localStorage.removeItem('master_key');
             chats = new Map();
         }
     } else {
