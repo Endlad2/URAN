@@ -106,7 +106,7 @@ async function checkOfflineMessages() {
                     time: msg.time,
                     sender: msg.sender,
                     receiver: currentUser.username,
-                    isRead: false,
+                    isRead: msg.sender === currentChat ? true : false,
                     isDelivered: true
                 });
             }
@@ -125,6 +125,11 @@ async function checkOfflineMessages() {
         
         await saveToLocalStorage();
         await refreshChatsList();
+        
+        if (currentChat) {
+            displayChatMessages(currentChat);
+        }
+        
         playNotification();
     }
 }
@@ -333,7 +338,7 @@ async function receiveMessage(peerId, data) {
         time: data.time || new Date().toISOString(),
         sender: senderUsername,
         receiver: currentUser.username,
-        isRead: false,
+        isRead: currentChat === senderUsername ? true : false,
         isDelivered: true
     };
     
@@ -633,20 +638,21 @@ async function fetchUserInfo(username) {
     }
 }
 
-async function loadChatAvatar(username, photoUrl, avatarElement) {
-    if (!photoUrl || !avatarElement) return;
+async function loadChatAvatar(username, photoUrl, avatarImg, initialsSpan) {
+    if (!photoUrl || !avatarImg) return false;
     
     console.log(`Загрузка аватара для чата: ${username}`);
     const avatarDataUrl = await loadUserAvatar(username, photoUrl);
     if (avatarDataUrl) {
-        avatarElement.src = avatarDataUrl;
-        avatarElement.style.display = 'block';
-        const initialsSpan = avatarElement.parentElement.querySelector('.chat-avatar-initials');
+        avatarImg.src = avatarDataUrl;
+        avatarImg.style.display = 'block';
         if (initialsSpan) {
             initialsSpan.style.display = 'none';
         }
         console.log(`Аватар загружен для ${username}`);
+        return true;
     }
+    return false;
 }
 
 async function addNewChat(chatWith) {
@@ -737,16 +743,9 @@ async function refreshChatsList() {
     });
     
     for (const [username, chatData] of sortedChats) {
-        const chatItem = createChatItem(username, chatData);
-        chatsList.appendChild(chatItem);
-        
         const userInfo = await fetchUserInfo(username);
-        if (userInfo.photo) {
-            const avatarImg = chatItem.querySelector('.chat-avatar-img');
-            if (avatarImg) {
-                await loadChatAvatar(username, userInfo.photo, avatarImg);
-            }
-        }
+        const chatItem = createChatItem(username, chatData, userInfo);
+        chatsList.appendChild(chatItem);
     }
     
     if (chats.size === 0) {
@@ -754,7 +753,7 @@ async function refreshChatsList() {
     }
 }
 
-function createChatItem(username, chatData) {
+function createChatItem(username, chatData, userInfo) {
     const div = document.createElement('div');
     div.className = 'chat-item';
     if (currentChat === username) div.classList.add('active');
@@ -786,6 +785,10 @@ function createChatItem(username, chatData) {
     initialsSpan.style.fontSize = '20px';
     initialsSpan.style.fontWeight = 'bold';
     avatarDiv.appendChild(initialsSpan);
+    
+    if (userInfo && userInfo.photo) {
+        loadChatAvatar(username, userInfo.photo, avatarImg, initialsSpan);
+    }
     
     const infoDiv = document.createElement('div');
     infoDiv.className = 'chat-info';
@@ -842,7 +845,7 @@ function openChat(username) {
         headerAvatar.style.borderRadius = '50%';
         
         fetchUserInfo(username).then(userInfo => {
-            if (userInfo.photo) {
+            if (userInfo && userInfo.photo) {
                 loadUserAvatar(username, userInfo.photo).then(avatarDataUrl => {
                     if (avatarDataUrl) {
                         headerAvatar.innerHTML = '';
