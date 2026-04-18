@@ -106,6 +106,7 @@ async function loadCurrentUser() {
             
             if (currentUser.photo) {
                 const avatarDataUrl = await loadUserAvatar(currentUser.username, currentUser.photo);
+                currentUser.avatarDataUrl = avatarDataUrl;
                 const avatarImg = document.getElementById('currentUserAvatar');
                 if (avatarImg) {
                     avatarImg.src = avatarDataUrl;
@@ -494,6 +495,16 @@ async function loadChats() {
             const key = await generateKey();
             const decrypted = await decryptData(JSON.parse(encryptedData), key);
             chats = new Map(decrypted);
+            
+            // Обновляем старые blob URL на data URL
+            for (const [username, chatData] of chats) {
+                if (chatData.avatar && !chatData.avatar.startsWith('data:') && !chatData.avatar.startsWith('http')) {
+                    console.log('Обновляем устаревший аватар для:', username);
+                    const newAvatar = await loadUserAvatar(username, null);
+                    chatData.avatar = newAvatar;
+                }
+            }
+            await saveToLocalStorage();
         } catch (error) {
             console.error('Ошибка расшифровки:', error);
             chats = new Map();
@@ -628,7 +639,12 @@ function updateUI() {
             usernameSpan.textContent = currentUser.username;
         }
         
-        if (currentUser.photo) {
+        if (currentUser.avatarDataUrl) {
+            const avatarImg = document.getElementById('currentUserAvatar');
+            if (avatarImg) {
+                avatarImg.src = currentUser.avatarDataUrl;
+            }
+        } else if (currentUser.photo) {
             loadUserAvatar(currentUser.username, currentUser.photo).then(url => {
                 const avatarImg = document.getElementById('currentUserAvatar');
                 if (avatarImg) {
@@ -674,15 +690,7 @@ function createChatItem(username, chatData) {
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
     
-    if (chatData.avatar && chatData.avatar.startsWith('data:')) {
-        const img = document.createElement('img');
-        img.src = chatData.avatar;
-        img.style.width = '100%';
-        img.style.height = '100%';
-        img.style.borderRadius = '50%';
-        img.style.objectFit = 'cover';
-        avatarDiv.appendChild(img);
-    } else if (chatData.avatar && chatData.avatar.startsWith('http')) {
+    if (chatData.avatar && (chatData.avatar.startsWith('data:') || chatData.avatar.startsWith('http'))) {
         const img = document.createElement('img');
         img.src = chatData.avatar;
         img.style.width = '100%';
@@ -734,21 +742,15 @@ function openChat(username) {
     const sendBtn = document.getElementById('sendBtn');
     
     if (headerName) headerName.textContent = username;
-    if (headerAvatar) headerAvatar.textContent = username.charAt(0).toUpperCase();
+    if (headerAvatar) {
+        headerAvatar.innerHTML = '';
+        headerAvatar.textContent = username.charAt(0).toUpperCase();
+    }
     if (messageInput) messageInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
     
     const chat = chats.get(username);
-    if (chat && chat.avatar && headerAvatar && chat.avatar.startsWith('data:')) {
-        const avatarImg = document.createElement('img');
-        avatarImg.src = chat.avatar;
-        avatarImg.style.width = '45px';
-        avatarImg.style.height = '45px';
-        avatarImg.style.borderRadius = '50%';
-        avatarImg.style.objectFit = 'cover';
-        headerAvatar.innerHTML = '';
-        headerAvatar.appendChild(avatarImg);
-    } else if (chat && chat.avatar && headerAvatar) {
+    if (chat && chat.avatar && headerAvatar && (chat.avatar.startsWith('data:') || chat.avatar.startsWith('http'))) {
         const avatarImg = document.createElement('img');
         avatarImg.src = chat.avatar;
         avatarImg.style.width = '45px';
@@ -999,7 +1001,36 @@ function startMessageChecker() {
     }, 30000);
 }
 
+async function clearOldBlobUrls() {
+    // Очищаем localStorage от старых blob URL
+    try {
+        const encryptedData = localStorage.getItem('chats_data');
+        if (encryptedData) {
+            const key = await generateKey();
+            const decrypted = await decryptData(JSON.parse(encryptedData), key);
+            let needUpdate = false;
+            
+            for (const [username, chatData] of decrypted) {
+                if (chatData.avatar && !chatData.avatar.startsWith('data:') && !chatData.avatar.startsWith('http')) {
+                    console.log('Найден устаревший blob URL для:', username);
+                    chatData.avatar = await loadUserAvatar(username, null);
+                    needUpdate = true;
+                }
+            }
+            
+            if (needUpdate) {
+                const newEncrypted = await encryptData(decrypted, key);
+                localStorage.setItem('chats_data', JSON.stringify(newEncrypted));
+                console.log('Очищены устаревшие blob URL');
+            }
+        }
+    } catch (error) {
+        console.error('Ошибка очистки blob URL:', error);
+    }
+}
+
 async function init() {
+    await clearOldBlobUrls();
     await loadCurrentUser();
     await loadChats();
     await initPeer();
