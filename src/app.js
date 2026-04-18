@@ -117,11 +117,11 @@ async function getMasterKey() {
     return encryptionKey;
 }
 
-async function encryptMessage(message) {
+async function encryptForStorage(data) {
     try {
         const key = await getMasterKey();
         const encoder = new TextEncoder();
-        const dataBuffer = encoder.encode(message);
+        const dataBuffer = encoder.encode(JSON.stringify(data));
         
         const iv = crypto.getRandomValues(new Uint8Array(12));
         const encrypted = await crypto.subtle.encrypt(
@@ -135,12 +135,12 @@ async function encryptMessage(message) {
             data: Array.from(new Uint8Array(encrypted))
         };
     } catch (error) {
-        console.error('Ошибка шифрования:', error);
+        console.error('Ошибка шифрования для хранилища:', error);
         return null;
     }
 }
 
-async function decryptMessage(encryptedData) {
+async function decryptFromStorage(encryptedData) {
     if (!encryptedData) return null;
     
     try {
@@ -155,9 +155,9 @@ async function decryptMessage(encryptedData) {
         );
         
         const decoder = new TextDecoder();
-        return decoder.decode(decrypted);
+        return JSON.parse(decoder.decode(decrypted));
     } catch (error) {
-        console.error('Ошибка расшифровки:', error);
+        console.error('Ошибка расшифровки хранилища:', error);
         return null;
     }
 }
@@ -331,7 +331,7 @@ function setupConnection(conn) {
                 conn.send({
                     type: 'message',
                     from: currentUser?.username,
-                    encryptedData: msg.encryptedData,
+                    text: msg.text,
                     time: msg.time,
                     messageId: msg.id
                 });
@@ -376,27 +376,12 @@ async function handleIncomingMessage(peerId, data) {
 }
 
 async function receiveMessage(peerId, data) {
-    if (!currentUser || !data.from) return;
+    if (!currentUser || !data.from || !data.text) return;
     
     const senderUsername = data.from;
-    let messageText = null;
-    
-    if (data.encryptedData) {
-        const decrypted = await decryptMessage(data.encryptedData);
-        if (decrypted) {
-            messageText = decrypted;
-        } else {
-            messageText = '[Зашифрованное сообщение]';
-        }
-    } else if (data.text) {
-        messageText = data.text;
-    }
-    
-    if (!messageText) return;
-    
     const message = {
         id: data.messageId || Date.now(),
-        text: messageText,
+        text: data.text,
         time: data.time || new Date().toISOString(),
         sender: senderUsername,
         receiver: currentUser.username,
@@ -454,11 +439,9 @@ async function saveUserInfo(peerId, data) {
 async function sendMessage(text) {
     if (!currentChat || !text.trim() || !currentUser) return;
     
-    const encryptedData = await encryptMessage(text.trim());
-    
     const message = {
         id: Date.now(),
-        encryptedData: encryptedData,
+        text: text.trim(),
         time: new Date().toISOString(),
         sender: currentUser.username,
         receiver: currentChat,
@@ -467,10 +450,7 @@ async function sendMessage(text) {
     };
     
     await saveMessage(currentChat, message);
-    displayMessage({
-        ...message,
-        text: text.trim()
-    });
+    displayMessage(message);
     
     const peerId = getPeerId(currentChat);
     const conn = connections.get(peerId);
@@ -482,7 +462,7 @@ async function sendMessage(text) {
             conn.send({
                 type: 'message',
                 from: currentUser.username,
-                encryptedData: encryptedData,
+                text: text.trim(),
                 time: message.time,
                 messageId: message.id
             });
@@ -586,75 +566,52 @@ async function saveMessage(chatWith, message) {
         chat.messages.push(message);
     }
     
-    const displayText = message.text || '[Зашифрованное сообщение]';
-    chat.lastMessage = displayText.substring(0, 50);
+    chat.lastMessage = message.text.substring(0, 50);
     chat.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
     
     await saveToLocalStorage();
-    updateLastMessage(chatWith, displayText);
+    updateLastMessage(chatWith, message.text);
 }
 
 async function saveToLocalStorage() {
-    const key = await getMasterKey();
-    const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
-        username,
-        {
-            messages: chatData.messages,
-            avatar: chatData.avatar,
-            lastMessage: chatData.lastMessage,
-            source: chatData.source
+    try {
+        const key = await getMasterKey();
+        const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
+            username,
+            {
+                messages: chatData.messages,
+                avatar: chatData.avatar,
+                lastMessage: chatData.lastMessage,
+                source: chatData.source
+            }
+        ]);
+        const encrypted = await encryptForStorage(dataToSave);
+        if (encrypted) {
+            localStorage.setItem('chats_data', JSON.stringify(encrypted));
+            console.log('Данные сохранены в localStorage');
         }
-    ]);
-    const encrypted = await encryptMasterData(dataToSave, key);
-    localStorage.setItem('chats_data', JSON.stringify(encrypted));
-}
-
-async function encryptMasterData(data, key) {
-    const encoder = new TextEncoder();
-    const dataBuffer = encoder.encode(JSON.stringify(data));
-    
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const encrypted = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv: iv },
-        key,
-        dataBuffer
-    );
-    
-    return {
-        iv: Array.from(iv),
-        data: Array.from(new Uint8Array(encrypted))
-    };
-}
-
-async function decryptMasterData(encryptedData, key) {
-    const iv = new Uint8Array(encryptedData.iv);
-    const data = new Uint8Array(encryptedData.data);
-    
-    const decrypted = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv: iv },
-        key,
-        data
-    );
-    
-    const decoder = new TextDecoder();
-    return JSON.parse(decoder.decode(decrypted));
+    } catch (error) {
+        console.error('Ошибка сохранения в localStorage:', error);
+    }
 }
 
 async function loadChats() {
     const encryptedData = localStorage.getItem('chats_data');
     if (encryptedData) {
         try {
-            const key = await getMasterKey();
-            const decrypted = await decryptMasterData(JSON.parse(encryptedData), key);
-            chats = new Map(decrypted);
-            
-            for (const [username, chatData] of chats) {
-                if (!chatData.avatar || !chatData.avatar.startsWith('data:')) {
-                    const newAvatar = await loadUserAvatar(username, null);
-                    chatData.avatar = newAvatar;
+            const decrypted = await decryptFromStorage(JSON.parse(encryptedData));
+            if (decrypted) {
+                chats = new Map(decrypted);
+                console.log(`Загружено ${chats.size} чатов из localStorage`);
+                
+                for (const [username, chatData] of chats) {
+                    if (!chatData.avatar || !chatData.avatar.startsWith('data:')) {
+                        const newAvatar = await loadUserAvatar(username, null);
+                        chatData.avatar = newAvatar;
+                    }
                 }
+                await saveToLocalStorage();
             }
-            await saveToLocalStorage();
         } catch (error) {
             console.error('Ошибка расшифровки, очищаем старые данные:', error);
             localStorage.removeItem('chats_data');
@@ -664,6 +621,7 @@ async function loadChats() {
         }
     } else {
         chats = new Map();
+        console.log('Нет сохраненных чатов');
     }
     
     await loadPendingFromLocalStorage();
@@ -688,18 +646,9 @@ async function checkOfflineMessages() {
         
         for (const [sender, messages] of messagesBySender) {
             for (const msg of messages) {
-                let messageText = msg.text;
-                
-                if (msg.encryptedData) {
-                    const decrypted = await decryptMessage(msg.encryptedData);
-                    if (decrypted) {
-                        messageText = decrypted;
-                    }
-                }
-                
                 await saveMessage(sender, {
                     id: msg.id,
-                    text: messageText,
+                    text: msg.text,
                     time: msg.time,
                     sender: msg.sender,
                     receiver: currentUser.username,
@@ -1054,13 +1003,7 @@ function displayChatMessages(username) {
     
     const chat = chats.get(username);
     if (chat && chat.messages) {
-        chat.messages.forEach(msg => {
-            let displayText = msg.text;
-            if (!displayText && msg.encryptedData) {
-                displayText = '[Зашифрованное сообщение]';
-            }
-            displayMessage({ ...msg, text: displayText });
-        });
+        chat.messages.forEach(msg => displayMessage(msg));
     }
     
     container.scrollTop = container.scrollHeight;
@@ -1257,7 +1200,15 @@ function startOfflineMessageChecker() {
     console.log('Запущена проверка офлайн сообщений (каждые 5 секунд)');
 }
 
+async function clearOldData() {
+    localStorage.removeItem('chats_data');
+    localStorage.removeItem('pending_messages');
+    localStorage.removeItem('master_encryption_key');
+    console.log('Старые данные очищены');
+}
+
 async function init() {
+    await clearOldData();
     await loadCurrentUser();
     await loadChats();
     await initPeer();
