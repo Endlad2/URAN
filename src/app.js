@@ -83,13 +83,13 @@ async function deleteOfflineMessagesFromFTP(receiver, sender) {
 
 async function checkOfflineMessages() {
     if (!currentUser) return;
-    
+
     console.log('Проверка офлайн сообщений...');
     const offlineMessages = await getOfflineMessagesFromFTP(currentUser.username);
-    
+
     if (offlineMessages && offlineMessages.length > 0) {
         console.log(`Найдено ${offlineMessages.length} офлайн сообщений`);
-        
+
         const messagesBySender = new Map();
         for (const msg of offlineMessages) {
             if (!messagesBySender.has(msg.sender)) {
@@ -97,7 +97,7 @@ async function checkOfflineMessages() {
             }
             messagesBySender.get(msg.sender).push(msg);
         }
-        
+
         for (const [sender, messages] of messagesBySender) {
             for (const msg of messages) {
                 await saveMessage(sender, {
@@ -110,9 +110,9 @@ async function checkOfflineMessages() {
                     isDelivered: true
                 });
             }
-            
+
             await deleteOfflineMessagesFromFTP(currentUser.username, sender);
-            
+
             if (!chats.has(sender)) {
                 const userInfo = await fetchUserInfo(sender);
                 chats.set(sender, {
@@ -122,14 +122,14 @@ async function checkOfflineMessages() {
                 });
             }
         }
-        
+
         await saveToLocalStorage();
         await refreshChatsList();
-        
+
         if (currentChat) {
             displayChatMessages(currentChat);
         }
-        
+
         playNotification();
     }
 }
@@ -138,29 +138,29 @@ async function loadUserAvatar(username, photoUrl) {
     if (!photoUrl) {
         return null;
     }
-    
+
     try {
         const match = photoUrl.match(/user=([a-f0-9]+)/);
         if (match) {
             const userHash = match[1];
             const zipUrl = `https://www.uran-chat.space/user_photo.php?user=${userHash}`;
-            
+
             console.log(`Загрузка фото для ${username}:`, zipUrl);
-            
+
             const response = await fetch(zipUrl);
-            
+
             if (!response.ok) {
                 console.error(`Ошибка HTTP ${response.status} для ${username}`);
                 return null;
             }
-            
+
             const blob = await response.blob();
-            
+
             if (blob.type === 'application/zip' || blob.type === 'application/x-zip-compressed') {
                 if (typeof JSZip !== 'undefined') {
                     const zip = await JSZip.loadAsync(blob);
                     const files = Object.keys(zip.files);
-                    
+
                     for (const fileName of files) {
                         if (!zip.files[fileName].dir) {
                             const fileBlob = await zip.files[fileName].async('blob');
@@ -185,24 +185,61 @@ async function loadUserAvatar(username, photoUrl) {
     } catch (error) {
         console.error('Ошибка загрузки аватара:', error);
     }
-    
+
     return null;
+}
+
+async function loadUserEncryptionKey(username) {
+    const keyKey = `encryption_key_${username}`;
+    const storedKey = localStorage.getItem(keyKey);
+    
+    if (storedKey) {
+        try {
+            const keyData = JSON.parse(storedKey);
+            encryptionKey = await crypto.subtle.importKey(
+                'jwk',
+                keyData,
+                { name: 'AES-GCM' },
+                false,
+                ['encrypt', 'decrypt']
+            );
+            console.log(`Ключ шифрования загружен для ${username}`);
+        } catch (e) {
+            console.error('Ошибка импорта ключа', e);
+            encryptionKey = null;
+        }
+    }
+    
+    if (!encryptionKey) {
+        encryptionKey = await crypto.subtle.generateKey(
+            { name: 'AES-GCM', length: 256 },
+            true,
+            ['encrypt', 'decrypt']
+        );
+        const exportedKey = await crypto.subtle.exportKey('jwk', encryptionKey);
+        localStorage.setItem(keyKey, JSON.stringify(exportedKey));
+        console.log(`Сгенерирован новый ключ шифрования для ${username}`);
+    }
+    
+    return encryptionKey;
 }
 
 async function loadCurrentUser() {
     try {
         const response = await fetch('https://www.uran-chat.space/get_session.php');
         const data = await response.json();
-        
+
         if (data.success && data.user_id && data.username) {
             currentUser = {
                 id: data.user_id,
                 username: data.username,
                 photo: data.photo || null
             };
-            
+
             console.log('Загружен пользователь:', currentUser);
             
+            await loadUserEncryptionKey(currentUser.username);
+
             const avatarImg = document.getElementById('currentUserAvatar');
             if (avatarImg && currentUser.photo) {
                 const avatarDataUrl = await loadUserAvatar(currentUser.username, currentUser.photo);
@@ -213,17 +250,16 @@ async function loadCurrentUser() {
                 }
             }
         } else {
-            throw new Error('No session found');
+            console.error('Нет активной сессии, перенаправление на страницу входа');
+            window.location.href = '/';
+            return;
         }
     } catch (error) {
         console.error('Ошибка загрузки пользователя:', error);
-        currentUser = {
-            id: Date.now(),
-            username: 'DemoUser' + Math.floor(Math.random() * 1000),
-            photo: null
-        };
+        window.location.href = '/';
+        return;
     }
-    
+
     const usernameSpan = document.getElementById('currentUsername');
     if (usernameSpan) {
         usernameSpan.textContent = currentUser.username;
@@ -236,32 +272,32 @@ function initPeer() {
             reject(new Error('User not loaded'));
             return;
         }
-        
+
         const peerId = getPeerId(currentUser.username);
         console.log('Создаем Peer с ID:', peerId);
-        
+
         peer = new Peer(peerId, peerConfig);
-        
+
         const timeout = setTimeout(() => {
             reject(new Error('PeerJS connection timeout'));
         }, 10000);
-        
+
         peer.on('open', async (id) => {
             clearTimeout(timeout);
             console.log('PeerJS подключен, ID:', id);
             updateConnectionStatus(true);
             resolve();
         });
-        
+
         peer.on('connection', (conn) => {
             console.log('Входящее соединение от:', conn.peer);
             setupConnection(conn);
         });
-        
+
         peer.on('error', (err) => {
             console.error('PeerJS ошибка:', err);
             updateConnectionStatus(false);
-            
+
             if (err.type === 'unavailable-id') {
                 console.warn('ID занят, переподключаемся...');
                 peer.destroy();
@@ -272,7 +308,7 @@ function initPeer() {
                 setTimeout(() => peer?.reconnect(), 3000);
             }
         });
-        
+
         peer.on('disconnected', () => {
             console.warn('PeerJS отключен, переподключаемся...');
             updateConnectionStatus(false);
@@ -283,7 +319,7 @@ function initPeer() {
 
 function setupConnection(conn) {
     connections.set(conn.peer, conn);
-    
+
     conn.on('open', () => {
         console.log('Соединение открыто с:', conn.peer);
         if (currentUser) {
@@ -293,17 +329,17 @@ function setupConnection(conn) {
             });
         }
     });
-    
+
     conn.on('data', async (data) => {
         await handleIncomingMessage(conn.peer, data);
     });
-    
+
     conn.on('close', () => {
         console.log('Соединение закрыто с:', conn.peer);
         connections.delete(conn.peer);
         updateUserStatus(conn.peer, false);
     });
-    
+
     conn.on('error', (err) => {
         console.error('Ошибка соединения:', err);
     });
@@ -330,7 +366,7 @@ async function handleIncomingMessage(peerId, data) {
 
 async function receiveMessage(peerId, data) {
     if (!currentUser || !data.from || !data.text) return;
-    
+
     const senderUsername = data.from;
     const message = {
         id: data.messageId || Date.now(),
@@ -341,13 +377,13 @@ async function receiveMessage(peerId, data) {
         isRead: currentChat === senderUsername ? true : false,
         isDelivered: true
     };
-    
+
     await saveMessage(senderUsername, message);
-    
+
     if (currentChat === senderUsername) {
         displayMessage(message);
     }
-    
+
     await refreshChatsList();
     playNotification();
 }
@@ -365,9 +401,9 @@ async function sendUserInfo(peerId) {
 
 async function saveUserInfo(peerId, data) {
     if (!data.username) return;
-    
+
     const username = data.username;
-    
+
     if (!chats.has(username)) {
         chats.set(username, {
             messages: [],
@@ -381,7 +417,7 @@ async function saveUserInfo(peerId, data) {
 
 async function sendMessage(text) {
     if (!currentChat || !text.trim() || !currentUser) return;
-    
+
     const message = {
         id: Date.now(),
         text: text.trim(),
@@ -391,15 +427,15 @@ async function sendMessage(text) {
         isRead: true,
         isDelivered: false
     };
-    
+
     await saveMessage(currentChat, message);
     displayMessage(message);
-    
+
     const peerId = getPeerId(currentChat);
     const conn = connections.get(peerId);
-    
+
     let messageDelivered = false;
-    
+
     if (conn && conn.open) {
         try {
             conn.send({
@@ -417,13 +453,13 @@ async function sendMessage(text) {
             console.error('Ошибка отправки через PeerJS:', error);
         }
     }
-    
+
     if (!messageDelivered) {
         console.log(`Peer ${currentChat} недоступен, сохраняем на FTP`);
         await saveOfflineMessageToFTP(currentChat, currentUser.username, message);
         showMessageQueued(currentChat, text);
     }
-    
+
     const messageInput = document.getElementById('messageInput');
     if (messageInput) {
         messageInput.value = '';
@@ -481,19 +517,19 @@ async function saveMessage(chatWith, message) {
             lastMessage: ''
         });
     }
-    
+
     const chat = chats.get(chatWith);
     const existingIndex = chat.messages.findIndex(m => m.id === message.id);
-    
+
     if (existingIndex !== -1) {
         chat.messages[existingIndex] = message;
     } else {
         chat.messages.push(message);
     }
-    
+
     chat.lastMessage = message.text.substring(0, 50);
     chat.messages.sort((a, b) => new Date(a.time) - new Date(b.time));
-    
+
     await saveToLocalStorage();
     updateLastMessage(chatWith, message.text);
 }
@@ -501,14 +537,14 @@ async function saveMessage(chatWith, message) {
 async function encryptData(data, key) {
     const encoder = new TextEncoder();
     const dataBuffer = encoder.encode(JSON.stringify(data));
-    
+
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const encrypted = await crypto.subtle.encrypt(
         { name: 'AES-GCM', iv: iv },
         key,
         dataBuffer
     );
-    
+
     return {
         iv: Array.from(iv),
         data: Array.from(new Uint8Array(encrypted))
@@ -518,45 +554,22 @@ async function encryptData(data, key) {
 async function decryptData(encryptedData, key) {
     const iv = new Uint8Array(encryptedData.iv);
     const data = new Uint8Array(encryptedData.data);
-    
+
     const decrypted = await crypto.subtle.decrypt(
         { name: 'AES-GCM', iv: iv },
         key,
         data
     );
-    
+
     const decoder = new TextDecoder();
     return JSON.parse(decoder.decode(decrypted));
 }
 
-async function generateKey() {
-    if (!encryptionKey) {
-        const storedKey = localStorage.getItem('encryption_key');
-        if (storedKey) {
-            const keyData = JSON.parse(storedKey);
-            encryptionKey = await crypto.subtle.importKey(
-                'jwk',
-                keyData,
-                { name: 'AES-GCM' },
-                false,
-                ['encrypt', 'decrypt']
-            );
-        } else {
-            encryptionKey = await crypto.subtle.generateKey(
-                { name: 'AES-GCM', length: 256 },
-                true,
-                ['encrypt', 'decrypt']
-            );
-            const exportedKey = await crypto.subtle.exportKey('jwk', encryptionKey);
-            localStorage.setItem('encryption_key', JSON.stringify(exportedKey));
-        }
-    }
-    return encryptionKey;
-}
-
 async function saveToLocalStorage() {
+    if (!currentUser) return;
+    
     try {
-        const key = await generateKey();
+        const key = await loadUserEncryptionKey(currentUser.username);
         const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
             username,
             {
@@ -567,7 +580,8 @@ async function saveToLocalStorage() {
             }
         ]);
         const encrypted = await encryptData(dataToSave, key);
-        localStorage.setItem('chats_data', JSON.stringify(encrypted));
+        const storageKey = `chats_data_${currentUser.username}`;
+        localStorage.setItem(storageKey, JSON.stringify(encrypted));
         console.log('Данные сохранены в localStorage');
     } catch (error) {
         console.error('Ошибка сохранения в localStorage:', error);
@@ -575,26 +589,30 @@ async function saveToLocalStorage() {
 }
 
 async function loadChats() {
-    const encryptedData = localStorage.getItem('chats_data');
+    if (!currentUser) return;
+    
+    const storageKey = `chats_data_${currentUser.username}`;
+    const encryptedData = localStorage.getItem(storageKey);
+    
     if (encryptedData) {
         try {
-            const key = await generateKey();
+            const key = await loadUserEncryptionKey(currentUser.username);
             const decrypted = await decryptData(JSON.parse(encryptedData), key);
             chats = new Map(decrypted);
-            console.log(`Загружено ${chats.size} чатов из localStorage`);
+            console.log(`Загружено ${chats.size} чатов из localStorage для ${currentUser.username}`);
         } catch (error) {
             console.error('Ошибка расшифровки:', error);
             chats = new Map();
         }
     } else {
         chats = new Map();
-        console.log('Нет сохраненных чатов');
+        console.log(`Нет сохраненных чатов для ${currentUser.username}`);
     }
 }
 
 async function syncChatsFromServer() {
     if (!currentUser) return;
-    
+
     try {
         const response = await fetch('https://www.uran-chat.space/chat_storage.php', {
             method: 'POST',
@@ -603,9 +621,9 @@ async function syncChatsFromServer() {
             },
             body: `action=get_chats&username=${encodeURIComponent(currentUser.username)}`
         });
-        
+
         const result = await response.json();
-        
+
         if (result.success && result.chats) {
             for (const chatUsername of result.chats) {
                 if (!chats.has(chatUsername)) {
@@ -618,7 +636,7 @@ async function syncChatsFromServer() {
                     });
                 }
             }
-            
+
             await saveToLocalStorage();
             await refreshChatsList();
         }
@@ -640,7 +658,7 @@ async function fetchUserInfo(username) {
 
 async function loadChatAvatar(username, photoUrl, avatarImg, initialsSpan) {
     if (!photoUrl || !avatarImg) return false;
-    
+
     console.log(`Загрузка аватара для чата: ${username}`);
     const avatarDataUrl = await loadUserAvatar(username, photoUrl);
     if (avatarDataUrl) {
@@ -657,12 +675,12 @@ async function loadChatAvatar(username, photoUrl, avatarImg, initialsSpan) {
 
 async function addNewChat(chatWith) {
     if (!currentUser) return false;
-    
+
     if (chatWith === currentUser.username) {
         alert('Нельзя создать чат с самим собой');
         return false;
     }
-    
+
     const response = await fetch('https://www.uran-chat.space/chat_storage.php', {
         method: 'POST',
         headers: {
@@ -670,9 +688,9 @@ async function addNewChat(chatWith) {
         },
         body: `action=add_chat&username=${encodeURIComponent(currentUser.username)}&chat_with=${encodeURIComponent(chatWith)}`
     });
-    
+
     const result = await response.json();
-    
+
     if (result.success) {
         if (!chats.has(chatWith)) {
             const userInfo = await fetchUserInfo(chatWith);
@@ -684,7 +702,7 @@ async function addNewChat(chatWith) {
             });
             await saveToLocalStorage();
         }
-        
+
         await refreshChatsList();
         await connectToUser(chatWith);
         return true;
@@ -696,22 +714,22 @@ async function addNewChat(chatWith) {
 
 async function connectToUser(username) {
     if (!peer) return null;
-    
+
     const peerId = getPeerId(username);
-    
+
     if (connections.has(peerId)) {
         const conn = connections.get(peerId);
         if (conn && conn.open) {
             return conn;
         }
     }
-    
+
     console.log('Подключаемся к Peer ID:', peerId);
     const conn = peer.connect(peerId, {
         reliable: true,
         serialization: 'json'
     });
-    
+
     setupConnection(conn);
     return conn;
 }
@@ -723,16 +741,16 @@ function updateUI() {
             usernameSpan.textContent = currentUser.username;
         }
     }
-    
+
     refreshChatsList();
 }
 
 async function refreshChatsList() {
     const chatsList = document.getElementById('chatsList');
     if (!chatsList) return;
-    
+
     chatsList.innerHTML = '';
-    
+
     const sortedChats = Array.from(chats.entries()).sort((a, b) => {
         const lastMsgA = a[1].messages[a[1].messages.length - 1];
         const lastMsgB = b[1].messages[b[1].messages.length - 1];
@@ -741,13 +759,13 @@ async function refreshChatsList() {
         if (!lastMsgB) return -1;
         return new Date(lastMsgB.time) - new Date(lastMsgA.time);
     });
-    
+
     for (const [username, chatData] of sortedChats) {
         const userInfo = await fetchUserInfo(username);
         const chatItem = createChatItem(username, chatData, userInfo);
         chatsList.appendChild(chatItem);
     }
-    
+
     if (chats.size === 0) {
         chatsList.innerHTML = '<div style="text-align: center; padding: 20px; color: #999;">Нет чатов. Нажмите + чтобы добавить</div>';
     }
@@ -757,7 +775,7 @@ function createChatItem(username, chatData, userInfo) {
     const div = document.createElement('div');
     div.className = 'chat-item';
     if (currentChat === username) div.classList.add('active');
-    
+
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
     avatarDiv.style.position = 'relative';
@@ -770,7 +788,7 @@ function createChatItem(username, chatData, userInfo) {
     avatarDiv.style.justifyContent = 'center';
     avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
     avatarDiv.style.color = 'white';
-    
+
     const avatarImg = document.createElement('img');
     avatarImg.className = 'chat-avatar-img';
     avatarImg.style.width = '100%';
@@ -778,30 +796,30 @@ function createChatItem(username, chatData, userInfo) {
     avatarImg.style.objectFit = 'cover';
     avatarImg.style.display = 'none';
     avatarDiv.appendChild(avatarImg);
-    
+
     const initialsSpan = document.createElement('span');
     initialsSpan.className = 'chat-avatar-initials';
     initialsSpan.textContent = getInitials(username);
     initialsSpan.style.fontSize = '20px';
     initialsSpan.style.fontWeight = 'bold';
     avatarDiv.appendChild(initialsSpan);
-    
+
     if (userInfo && userInfo.photo) {
         loadChatAvatar(username, userInfo.photo, avatarImg, initialsSpan);
     }
-    
+
     const infoDiv = document.createElement('div');
     infoDiv.className = 'chat-info';
-    
+
     const nameDiv = document.createElement('div');
     nameDiv.className = 'chat-name';
     nameDiv.textContent = username;
-    
+
     const lastMsgDiv = document.createElement('div');
     lastMsgDiv.className = 'last-message';
     const lastMsg = chatData.lastMessage || 'Нет сообщений';
     lastMsgDiv.textContent = lastMsg.length > 50 ? lastMsg.substring(0, 47) + '...' : lastMsg;
-    
+
     const unreadCount = chatData.messages.filter(m => m.sender === username && !m.isRead).length;
     if (unreadCount > 0) {
         const unreadBadge = document.createElement('span');
@@ -809,26 +827,26 @@ function createChatItem(username, chatData, userInfo) {
         unreadBadge.textContent = unreadCount;
         nameDiv.appendChild(unreadBadge);
     }
-    
+
     infoDiv.appendChild(nameDiv);
     infoDiv.appendChild(lastMsgDiv);
-    
+
     div.appendChild(avatarDiv);
     div.appendChild(infoDiv);
-    
+
     div.onclick = () => openChat(username);
-    
+
     return div;
 }
 
 function openChat(username) {
     currentChat = username;
-    
+
     const headerName = document.getElementById('chatHeaderName');
     const headerAvatar = document.getElementById('chatHeaderAvatar');
     const messageInput = document.getElementById('messageInput');
     const sendBtn = document.getElementById('sendBtn');
-    
+
     if (headerName) headerName.textContent = username;
     if (headerAvatar) {
         headerAvatar.innerHTML = '';
@@ -843,7 +861,7 @@ function openChat(username) {
         headerAvatar.style.width = '45px';
         headerAvatar.style.height = '45px';
         headerAvatar.style.borderRadius = '50%';
-        
+
         fetchUserInfo(username).then(userInfo => {
             if (userInfo && userInfo.photo) {
                 loadUserAvatar(username, userInfo.photo).then(avatarDataUrl => {
@@ -864,13 +882,13 @@ function openChat(username) {
     }
     if (messageInput) messageInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
-    
+
     displayChatMessages(username);
-    
+
     const peerId = getPeerId(username);
     const conn = connections.get(peerId);
     updateConnectionStatus(conn && conn.open);
-    
+
     const chat = chats.get(username);
     if (chat) {
         const unreadMessages = chat.messages.filter(m => m.sender === username && !m.isRead);
@@ -879,7 +897,7 @@ function openChat(username) {
         }
         saveToLocalStorage();
     }
-    
+
     document.querySelectorAll('.chat-item').forEach(item => {
         item.classList.remove('active');
         const nameDiv = item.querySelector('.chat-name');
@@ -892,33 +910,33 @@ function openChat(username) {
 function displayChatMessages(username) {
     const container = document.getElementById('messagesContainer');
     if (!container) return;
-    
+
     container.innerHTML = '';
-    
+
     const chat = chats.get(username);
     if (chat && chat.messages) {
         chat.messages.forEach(msg => displayMessage(msg));
     }
-    
+
     container.scrollTop = container.scrollHeight;
 }
 
 function displayMessage(message) {
     const container = document.getElementById('messagesContainer');
     if (!container || !currentUser) return;
-    
+
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${message.sender === currentUser.username ? 'sent' : 'received'}`;
-    
+
     const textDiv = document.createElement('div');
     textDiv.className = 'message-text';
     textDiv.textContent = message.text;
-    
+
     const timeDiv = document.createElement('div');
     timeDiv.className = 'message-time';
     const time = new Date(message.time);
     timeDiv.textContent = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
+
     if (message.sender === currentUser.username) {
         const statusSpan = document.createElement('span');
         statusSpan.style.marginLeft = '8px';
@@ -932,10 +950,10 @@ function displayMessage(message) {
         }
         timeDiv.appendChild(statusSpan);
     }
-    
+
     messageDiv.appendChild(textDiv);
     messageDiv.appendChild(timeDiv);
-    
+
     container.appendChild(messageDiv);
     container.scrollTop = container.scrollHeight;
 }
@@ -1025,12 +1043,12 @@ function closeModal() {
 async function createNewChat() {
     const input = document.getElementById('newChatUsername');
     const username = input.value.trim();
-    
+
     if (!username) {
         alert('Введите имя пользователя');
         return;
     }
-    
+
     const success = await addNewChat(username);
     if (success) {
         closeModal();
@@ -1042,7 +1060,7 @@ function setupEventListeners() {
     const newChatBtn = document.getElementById('newChatBtn');
     const sendBtn = document.getElementById('sendBtn');
     const messageInput = document.getElementById('messageInput');
-    
+
     if (newChatBtn) newChatBtn.onclick = showNewChatModal;
     if (sendBtn) {
         sendBtn.onclick = () => {
@@ -1056,7 +1074,7 @@ function setupEventListeners() {
             }
         };
     }
-    
+
     let typingTimeout;
     if (messageInput) {
         messageInput.oninput = () => {
@@ -1068,7 +1086,7 @@ function setupEventListeners() {
                         type: 'typing',
                         isTyping: true
                     });
-                    
+
                     if (typingTimeout) clearTimeout(typingTimeout);
                     typingTimeout = setTimeout(() => {
                         if (conn && conn.open) {
