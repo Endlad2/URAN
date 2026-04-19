@@ -30,6 +30,126 @@ function getInitials(username) {
     return username.charAt(0).toUpperCase();
 }
 
+// Добавьте эту функцию в существующий app.js
+
+function showAccountsModal() {
+    const modal = document.createElement('div');
+    modal.className = 'accounts-modal';
+    modal.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        z-index: 1001;
+    `;
+    
+    modal.innerHTML = `
+        <div style="background: white; border-radius: 20px; padding: 30px; width: 90%; max-width: 400px;">
+            <h3 style="margin-bottom: 20px; color: #333;">Подключить аккаунты</h3>
+            <button id="connect-telegram-btn" style="width: 100%; padding: 15px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 10px; cursor: pointer; margin-bottom: 10px;">
+                Подключить Telegram
+            </button>
+            <div style="padding: 15px; background: #f8f9fa; border-radius: 10px; color: #999; text-align: center; margin-bottom: 10px;">
+                Скоро: WhatsApp, Viber, Signal
+            </div>
+            <button id="close-accounts-modal" style="width: 100%; padding: 15px; background: #e0e0e0; color: #333; border: none; border-radius: 10px; cursor: pointer;">
+                Закрыть
+            </button>
+        </div>
+    `;
+    
+    document.body.appendChild(modal);
+    
+    document.getElementById('connect-telegram-btn').onclick = () => {
+        const tgWindow = window.open('/connect-telegram.php', 'telegram_auth', 'width=600,height=700');
+        
+        window.addEventListener('message', async (event) => {
+            if (event.data.type === 'telegram_connected') {
+                console.log('Telegram подключен:', event.data.user);
+                await syncTelegramChats();
+                modal.remove();
+            }
+        });
+    };
+    
+    document.getElementById('close-accounts-modal').onclick = () => {
+        modal.remove();
+    };
+}
+
+async function syncTelegramChats() {
+    showStatus('Синхронизация чатов Telegram...', 'info');
+    
+    try {
+        const sessionData = localStorage.getItem('telegram_session');
+        if (!sessionData) {
+            console.error('Нет сессии Telegram');
+            return;
+        }
+        
+        const response = await fetch('https://www.uran-chat.space/sync_telegram.php', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ session: JSON.parse(sessionData) })
+        });
+        
+        const result = await response.json();
+        
+        if (result.success) {
+            for (const chat of result.chats) {
+                const chatId = `tg_${chat.id}`;
+                if (!chats.has(chatId)) {
+                    chats.set(chatId, {
+                        messages: [],
+                        avatar: chat.photo || null,
+                        lastMessage: chat.last_message || '',
+                        source: 'telegram',
+                        tgData: {
+                            id: chat.id,
+                            type: chat.type,
+                            title: chat.title,
+                            username: chat.username
+                        }
+                    });
+                }
+            }
+            await saveToLocalStorage();
+            await refreshChatsList();
+            showStatus('Чаты Telegram синхронизированы!', 'success');
+        }
+    } catch (error) {
+        console.error('Ошибка синхронизации Telegram:', error);
+        showStatus('Ошибка синхронизации Telegram', 'error');
+    }
+}
+
+// Добавьте кнопку в sidebar-header (рядом с newChatBtn)
+function addAccountsButton() {
+    const sidebarHeader = document.querySelector('.sidebar-header');
+    if (sidebarHeader) {
+        const accountsBtn = document.createElement('button');
+        accountsBtn.className = 'accounts-btn';
+        accountsBtn.style.cssText = 'background: #475569; border: none; color: white; cursor: pointer; padding: 8px; border-radius: 6px; display: flex; align-items: center; gap: 5px; margin-left: 10px;';
+        accountsBtn.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                <circle cx="12" cy="7" r="4"></circle>
+                <path d="M17 3.5a4 4 0 0 1 0 7"></path>
+            </svg>
+            <span>Аккаунты</span>
+        `;
+        accountsBtn.onclick = showAccountsModal;
+        sidebarHeader.appendChild(accountsBtn);
+    }
+}
+
+// Вызовите addAccountsButton() в init() после updateUI()
+
 async function saveOfflineMessageToFTP(receiver, sender, message) {
     try {
         const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
@@ -994,6 +1114,7 @@ function updateUserStatus(peerId, isOnline) {
     }
 }
 
+
 function updateTypingStatus(peerId, isTyping) {
     for (const [username] of chats) {
         if (getPeerId(username) === peerId && currentChat === username && isTyping) {
@@ -1118,6 +1239,7 @@ async function init() {
     await initPeer();
     await syncChatsFromServer();
     updateUI();
+    addAccountsButton();
     setupEventListeners();
     startOfflineMessageChecker();
 }
