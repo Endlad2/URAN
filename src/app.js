@@ -5,9 +5,6 @@ let connections = new Map();
 let chats = new Map();
 let encryptionKey = null;
 let offlineCheckInterval = null;
-let tgClient = null;
-let tgConnected = false;
-let tgCredentials = null;
 
 const peerConfig = {
     config: {
@@ -31,253 +28,6 @@ function getPeerId(username) {
 
 function getInitials(username) {
     return username.charAt(0).toUpperCase();
-}
-
-async function loadTelegramCredentials() {
-    try {
-        const response = await fetch('https://www.uran-chat.space/app_cred.php');
-        const data = await response.json();
-        tgCredentials = data;
-        console.log('Telegram credentials загружены');
-        return tgCredentials;
-    } catch (error) {
-        console.error('Ошибка загрузки Telegram credentials:', error);
-        return null;
-    }
-}
-
-async function initTelegramClient() {
-    if (!tgCredentials) {
-        await loadTelegramCredentials();
-    }
-    
-    if (!tgCredentials || typeof TelegramClient === 'undefined') {
-        console.log('TelegramClient не загружен или нет credentials');
-        return false;
-    }
-    
-    try {
-        const savedSession = localStorage.getItem('telegram_session_data');
-        
-        tgClient = new TelegramClient(
-            new Api.TelegramClient('uran-chat', tgCredentials.telegram.api_id, tgCredentials.telegram.api_hash),
-            {
-                deviceModel: tgCredentials.device_model,
-                systemVersion: tgCredentials.system_version,
-                appVersion: tgCredentials.version,
-                session: savedSession ? JSON.parse(savedSession) : undefined
-            }
-        );
-        
-        await tgClient.start({
-            qrCode: (qr) => {
-                console.log('QR Code для Telegram получен');
-                showTelegramQR(qr);
-            },
-            onError: (err) => {
-                console.error('Telegram ошибка:', err);
-                tgConnected = false;
-                updateTelegramButtonStatus(false);
-            }
-        });
-        
-        tgConnected = true;
-        
-        const sessionData = await tgClient.exportSession();
-        localStorage.setItem('telegram_session_data', JSON.stringify(sessionData));
-        
-        updateTelegramButtonStatus(true);
-        await loadTelegramChats();
-        
-        return true;
-    } catch (error) {
-        console.error('Ошибка инициализации Telegram:', error);
-        updateTelegramButtonStatus(false);
-        return false;
-    }
-}
-
-function updateTelegramButtonStatus(connected) {
-    const tgBtn = document.querySelector('.tg-connect-btn');
-    if (!tgBtn) return;
-    
-    if (connected) {
-        tgBtn.style.background = '#4caf50';
-        tgBtn.innerHTML = `
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="20 6 9 17 4 12"></polyline>
-            </svg>
-            <span>Telegram</span>
-        `;
-        tgBtn.disabled = false;
-    } else {
-        tgBtn.style.background = '#29a9e9';
-        tgBtn.innerHTML = `
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M21.5 4.5L2.5 12.5L9.5 14.5L13.5 21.5L21.5 4.5Z"/>
-                <path d="M9.5 14.5L13.5 21.5L21.5 4.5L9.5 14.5Z"/>
-            </svg>
-            <span>Telegram</span>
-        `;
-        tgBtn.disabled = false;
-    }
-}
-
-async function loadTelegramChats() {
-    if (!tgClient || !tgConnected) return;
-    
-    try {
-        const me = await tgClient.getMe();
-        console.log('Telegram пользователь:', me);
-        
-        const dialogs = await tgClient.getDialogs({ limit: 100 });
-        
-        for (const dialog of dialogs) {
-            const chatId = `tg_${dialog.id}`;
-            
-            let avatarUrl = null;
-            if (dialog.entity?.photo) {
-                try {
-                    const photo = await tgClient.downloadProfilePhoto(dialog.entity);
-                    if (photo) {
-                        avatarUrl = URL.createObjectURL(photo);
-                    }
-                } catch (e) {
-                    console.error('Ошибка загрузки фото:', e);
-                }
-            }
-            
-            const chatData = {
-                messages: [],
-                avatar: avatarUrl,
-                lastMessage: dialog.message?.text || '',
-                source: 'telegram',
-                tgData: {
-                    id: dialog.id,
-                    type: dialog.isUser ? 'user' : (dialog.isGroup ? 'group' : 'channel'),
-                    title: dialog.title,
-                    username: dialog.username,
-                    unreadCount: dialog.unreadCount,
-                    status: dialog.entity?.status?._ === 'userStatusOnline' ? 'online' : 'offline'
-                }
-            };
-            
-            if (!chats.has(chatId)) {
-                chats.set(chatId, chatData);
-            }
-        }
-        
-        await saveToLocalStorage();
-        await refreshChatsList();
-        
-    } catch (error) {
-        console.error('Ошибка загрузки чатов Telegram:', error);
-    }
-}
-
-async function getTelegramMessages(chatId, limit = 50) {
-    if (!tgClient || !tgConnected) return [];
-    
-    try {
-        const tgChatId = parseInt(chatId.replace('tg_', ''));
-        const messages = await tgClient.getMessages(tgChatId, { limit: limit });
-        
-        const formattedMessages = [];
-        for (const msg of messages) {
-            let senderId = chatId;
-            if (msg.fromId?.userId) {
-                senderId = `tg_${msg.fromId.userId}`;
-            }
-            
-            formattedMessages.push({
-                id: msg.id,
-                text: msg.message || '[Медиа]',
-                time: new Date(msg.date * 1000).toISOString(),
-                sender: senderId,
-                receiver: chatId,
-                isRead: true,
-                isDelivered: true
-            });
-        }
-        
-        return formattedMessages;
-    } catch (error) {
-        console.error('Ошибка получения сообщений Telegram:', error);
-        return [];
-    }
-}
-
-async function sendTelegramMessage(chatId, text) {
-    if (!tgClient || !tgConnected) return false;
-    
-    try {
-        const tgChatId = parseInt(chatId.replace('tg_', ''));
-        const result = await tgClient.sendMessage(tgChatId, { message: text });
-        
-        if (result) {
-            const message = {
-                id: result.id,
-                text: result.message,
-                time: new Date(result.date * 1000).toISOString(),
-                sender: currentUser.username,
-                receiver: chatId,
-                isRead: true,
-                isDelivered: true
-            };
-            await saveMessage(chatId, message);
-            displayMessage(message);
-            return true;
-        }
-    } catch (error) {
-        console.error('Ошибка отправки в Telegram:', error);
-    }
-    return false;
-}
-
-function showTelegramQR(qrData) {
-    let qrModal = document.querySelector('.tg-qr-modal');
-    if (!qrModal) {
-        qrModal = document.createElement('div');
-        qrModal.className = 'tg-qr-modal';
-        qrModal.style.cssText = `
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: rgba(0,0,0,0.8);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            z-index: 2000;
-        `;
-        document.body.appendChild(qrModal);
-    }
-    
-    qrModal.innerHTML = `
-        <div style="background: white; border-radius: 20px; padding: 30px; text-align: center; max-width: 400px;">
-            <h3 style="margin-bottom: 20px; color: #333;">Подключение Telegram</h3>
-            <div id="tg-qr-container" style="margin: 20px 0; display: flex; justify-content: center;"></div>
-            <p style="margin-bottom: 20px; color: #666;">Отсканируйте QR-код в приложении Telegram<br>(Настройки -> Устройства -> Сканировать QR)</p>
-            <button id="close-tg-qr" style="padding: 10px 20px; background: #667eea; color: white; border: none; border-radius: 10px; cursor: pointer;">Закрыть</button>
-        </div>
-    `;
-    
-    if (typeof QRCode !== 'undefined') {
-        new QRCode(document.getElementById('tg-qr-container'), {
-            text: qrData,
-            width: 200,
-            height: 200
-        });
-    } else {
-        const img = document.createElement('img');
-        img.src = `https://api.qrserver.com/v1/create-qr-code/?size=200x200&data=${encodeURIComponent(qrData)}`;
-        document.getElementById('tg-qr-container').appendChild(img);
-    }
-    
-    document.getElementById('close-tg-qr').onclick = () => {
-        qrModal.remove();
-    };
 }
 
 async function saveOfflineMessageToFTP(receiver, sender, message) {
@@ -667,28 +417,7 @@ async function saveUserInfo(peerId, data) {
 
 async function sendMessage(text) {
     if (!currentChat || !text.trim() || !currentUser) return;
-    
-    if (currentChat.startsWith('tg_')) {
-        const success = await sendTelegramMessage(currentChat, text);
-        if (success) {
-            showMessageDelivered(currentChat);
-        } else {
-            showMessageQueued(currentChat, text);
-            await saveOfflineMessageToFTP(currentChat, currentUser.username, {
-                id: Date.now(),
-                text: text.trim(),
-                time: new Date().toISOString(),
-                sender: currentUser.username,
-                receiver: currentChat
-            });
-        }
-        
-        const messageInput = document.getElementById('messageInput');
-        if (messageInput) messageInput.value = '';
-        await refreshChatsList();
-        return;
-    }
-    
+
     const message = {
         id: Date.now(),
         text: text.trim(),
@@ -841,14 +570,13 @@ async function saveToLocalStorage() {
     
     try {
         const key = await loadUserEncryptionKey(currentUser.username);
-        const dataToSave = Array.from(chats.entries()).map(([chatId, chatData]) => [
-            chatId,
+        const dataToSave = Array.from(chats.entries()).map(([username, chatData]) => [
+            username,
             {
                 messages: chatData.messages,
                 avatar: chatData.avatar,
                 lastMessage: chatData.lastMessage,
-                source: chatData.source,
-                tgData: chatData.tgData
+                source: chatData.source
             }
         ]);
         const encrypted = await encryptData(dataToSave, key);
@@ -928,18 +656,18 @@ async function fetchUserInfo(username) {
     }
 }
 
-async function loadChatAvatar(chatId, photoUrl, avatarImg, initialsSpan) {
+async function loadChatAvatar(username, photoUrl, avatarImg, initialsSpan) {
     if (!photoUrl || !avatarImg) return false;
 
-    console.log(`Загрузка аватара для чата: ${chatId}`);
-    const avatarDataUrl = await loadUserAvatar(chatId, photoUrl);
+    console.log(`Загрузка аватара для чата: ${username}`);
+    const avatarDataUrl = await loadUserAvatar(username, photoUrl);
     if (avatarDataUrl) {
         avatarImg.src = avatarDataUrl;
         avatarImg.style.display = 'block';
         if (initialsSpan) {
             initialsSpan.style.display = 'none';
         }
-        console.log(`Аватар загружен для ${chatId}`);
+        console.log(`Аватар загружен для ${username}`);
         return true;
     }
     return false;
@@ -1032,19 +760,9 @@ async function refreshChatsList() {
         return new Date(lastMsgB.time) - new Date(lastMsgA.time);
     });
 
-    for (const [chatId, chatData] of sortedChats) {
-        let userInfo = null;
-        let displayName = chatId;
-        
-        if (chatData.source === 'telegram' && chatData.tgData) {
-            displayName = chatData.tgData.title || chatData.tgData.username || chatId;
-            userInfo = { username: displayName, photo: chatData.avatar };
-        } else {
-            userInfo = await fetchUserInfo(chatId);
-            displayName = userInfo.username || chatId;
-        }
-        
-        const chatItem = createChatItem(chatId, chatData, userInfo, displayName);
+    for (const [username, chatData] of sortedChats) {
+        const userInfo = await fetchUserInfo(username);
+        const chatItem = createChatItem(username, chatData, userInfo);
         chatsList.appendChild(chatItem);
     }
 
@@ -1053,11 +771,11 @@ async function refreshChatsList() {
     }
 }
 
-function createChatItem(chatId, chatData, userInfo, displayName) {
+function createChatItem(username, chatData, userInfo) {
     const div = document.createElement('div');
     div.className = 'chat-item';
-    if (currentChat === chatId) div.classList.add('active');
-    
+    if (currentChat === username) div.classList.add('active');
+
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
     avatarDiv.style.position = 'relative';
@@ -1068,14 +786,9 @@ function createChatItem(chatId, chatData, userInfo, displayName) {
     avatarDiv.style.display = 'flex';
     avatarDiv.style.alignItems = 'center';
     avatarDiv.style.justifyContent = 'center';
-    
-    if (chatData.source === 'telegram') {
-        avatarDiv.style.background = '#29a9e9';
-    } else {
-        avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-    }
+    avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
     avatarDiv.style.color = 'white';
-    
+
     const avatarImg = document.createElement('img');
     avatarImg.className = 'chat-avatar-img';
     avatarImg.style.width = '100%';
@@ -1083,244 +796,148 @@ function createChatItem(chatId, chatData, userInfo, displayName) {
     avatarImg.style.objectFit = 'cover';
     avatarImg.style.display = 'none';
     avatarDiv.appendChild(avatarImg);
-    
+
     const initialsSpan = document.createElement('span');
     initialsSpan.className = 'chat-avatar-initials';
-    initialsSpan.textContent = getInitials(displayName);
+    initialsSpan.textContent = getInitials(username);
     initialsSpan.style.fontSize = '20px';
     initialsSpan.style.fontWeight = 'bold';
     avatarDiv.appendChild(initialsSpan);
-    
-    const messengerIcon = document.createElement('img');
-    messengerIcon.style.position = 'absolute';
-    messengerIcon.style.bottom = '-2px';
-    messengerIcon.style.right = '-2px';
-    messengerIcon.style.width = '18px';
-    messengerIcon.style.height = '18px';
-    messengerIcon.style.borderRadius = '50%';
-    messengerIcon.style.backgroundColor = 'white';
-    messengerIcon.style.padding = '2px';
-    messengerIcon.style.zIndex = '1';
-    
-    if (chatData.source === 'telegram') {
-        messengerIcon.src = 'https://www.uran-chat.space/tg.ico';
-    } else {
-        messengerIcon.src = 'https://www.uran-chat.space/favicon.ico';
+
+    if (userInfo && userInfo.photo) {
+        loadChatAvatar(username, userInfo.photo, avatarImg, initialsSpan);
     }
-    avatarDiv.appendChild(messengerIcon);
-    
+
     const infoDiv = document.createElement('div');
     infoDiv.className = 'chat-info';
-    
+
     const nameDiv = document.createElement('div');
     nameDiv.className = 'chat-name';
-    nameDiv.textContent = displayName;
-    
-    if (chatData.source === 'telegram' && chatData.tgData && chatData.tgData.username) {
-        const usernameSpan = document.createElement('span');
-        usernameSpan.style.fontSize = '11px';
-        usernameSpan.style.color = '#888';
-        usernameSpan.style.marginLeft = '5px';
-        usernameSpan.textContent = `@${chatData.tgData.username}`;
-        nameDiv.appendChild(usernameSpan);
-    }
-    
+    nameDiv.textContent = username;
+
     const lastMsgDiv = document.createElement('div');
     lastMsgDiv.className = 'last-message';
-    let lastMsg = chatData.lastMessage || 'Нет сообщений';
+    const lastMsg = chatData.lastMessage || 'Нет сообщений';
     lastMsgDiv.textContent = lastMsg.length > 50 ? lastMsg.substring(0, 47) + '...' : lastMsg;
-    
-    const unreadCount = chatData.messages.filter(m => m.sender === chatId && !m.isRead).length;
+
+    const unreadCount = chatData.messages.filter(m => m.sender === username && !m.isRead).length;
     if (unreadCount > 0) {
         const unreadBadge = document.createElement('span');
         unreadBadge.style.cssText = 'background: #667eea; color: white; border-radius: 10px; padding: 2px 6px; font-size: 10px; margin-left: 5px;';
         unreadBadge.textContent = unreadCount;
         nameDiv.appendChild(unreadBadge);
     }
-    
-    if (chatData.source === 'telegram' && chatData.tgData && chatData.tgData.status === 'online') {
-        const onlineDot = document.createElement('span');
-        onlineDot.style.cssText = 'display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4caf50; margin-left: 8px;';
-        nameDiv.appendChild(onlineDot);
-    }
-    
+
     infoDiv.appendChild(nameDiv);
     infoDiv.appendChild(lastMsgDiv);
-    
+
     div.appendChild(avatarDiv);
     div.appendChild(infoDiv);
-    
-    div.onclick = () => openChat(chatId);
-    
-    if (userInfo && userInfo.photo) {
-        loadChatAvatar(displayName, userInfo.photo, avatarImg, initialsSpan);
-    } else if (chatData.avatar) {
-        loadChatAvatar(displayName, chatData.avatar, avatarImg, initialsSpan);
-    }
-    
+
+    div.onclick = () => openChat(username);
+
     return div;
 }
 
-async function openChat(chatId) {
-    currentChat = chatId;
-    
+function openChat(username) {
+    currentChat = username;
+
     const headerName = document.getElementById('chatHeaderName');
     const headerAvatar = document.getElementById('chatHeaderAvatar');
     const messageInput = document.getElementById('messageInput');
     const sendBtn = document.getElementById('sendBtn');
-    
-    let displayName = chatId;
-    const chat = chats.get(chatId);
-    
-    if (chat && chat.source === 'telegram' && chat.tgData) {
-        displayName = chat.tgData.title || chat.tgData.username || chatId;
-        if (headerName) headerName.textContent = displayName;
-        
-        const statusDiv = document.getElementById('chatHeaderStatus');
-        if (statusDiv && chat.tgData) {
-            if (chat.tgData.status === 'online') {
-                statusDiv.textContent = 'Онлайн (Telegram)';
-                statusDiv.style.color = '#4caf50';
-            } else {
-                statusDiv.textContent = 'Telegram';
-                statusDiv.style.color = '#888';
-            }
-        }
-    } else {
-        if (headerName) headerName.textContent = chatId;
-    }
-    
+
+    if (headerName) headerName.textContent = username;
     if (headerAvatar) {
         headerAvatar.innerHTML = '';
-        headerAvatar.textContent = getInitials(displayName);
+        headerAvatar.textContent = getInitials(username);
         headerAvatar.style.display = 'flex';
         headerAvatar.style.alignItems = 'center';
         headerAvatar.style.justifyContent = 'center';
         headerAvatar.style.fontSize = '20px';
         headerAvatar.style.fontWeight = 'bold';
-        
-        if (chat && chat.source === 'telegram') {
-            headerAvatar.style.background = '#29a9e9';
-        } else {
-            headerAvatar.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
-        }
+        headerAvatar.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
         headerAvatar.style.color = 'white';
         headerAvatar.style.width = '45px';
         headerAvatar.style.height = '45px';
         headerAvatar.style.borderRadius = '50%';
-        
-        if (chat && chat.avatar) {
-            const img = document.createElement('img');
-            img.src = chat.avatar;
-            img.style.width = '100%';
-            img.style.height = '100%';
-            img.style.borderRadius = '50%';
-            img.style.objectFit = 'cover';
-            headerAvatar.innerHTML = '';
-            headerAvatar.appendChild(img);
-        } else {
-            fetchUserInfo(chatId).then(userInfo => {
-                if (userInfo && userInfo.photo) {
-                    loadUserAvatar(displayName, userInfo.photo).then(avatarDataUrl => {
-                        if (avatarDataUrl) {
-                            headerAvatar.innerHTML = '';
-                            const img = document.createElement('img');
-                            img.src = avatarDataUrl;
-                            img.style.width = '100%';
-                            img.style.height = '100%';
-                            img.style.borderRadius = '50%';
-                            img.style.objectFit = 'cover';
-                            headerAvatar.appendChild(img);
-                        }
-                    });
-                }
-            });
-        }
+
+        fetchUserInfo(username).then(userInfo => {
+            if (userInfo && userInfo.photo) {
+                loadUserAvatar(username, userInfo.photo).then(avatarDataUrl => {
+                    if (avatarDataUrl) {
+                        headerAvatar.innerHTML = '';
+                        const img = document.createElement('img');
+                        img.src = avatarDataUrl;
+                        img.style.width = '100%';
+                        img.style.height = '100%';
+                        img.style.borderRadius = '50%';
+                        img.style.objectFit = 'cover';
+                        headerAvatar.appendChild(img);
+                        console.log(`Аватар загружен для шапки чата: ${username}`);
+                    }
+                });
+            }
+        });
     }
-    
     if (messageInput) messageInput.disabled = false;
     if (sendBtn) sendBtn.disabled = false;
-    
-    await displayChatMessages(chatId);
-    
-    if (chat && chat.source === 'telegram' && tgConnected) {
-        const tgMessages = await getTelegramMessages(chatId);
-        if (tgMessages.length > 0) {
-            for (const msg of tgMessages) {
-                const exists = chat.messages.some(m => m.id === msg.id);
-                if (!exists) {
-                    await saveMessage(chatId, msg);
-                }
-            }
-            await displayChatMessages(chatId);
-        }
-    }
-    
-    const peerId = getPeerId(chatId);
+
+    displayChatMessages(username);
+
+    const peerId = getPeerId(username);
     const conn = connections.get(peerId);
     updateConnectionStatus(conn && conn.open);
-    
+
+    const chat = chats.get(username);
     if (chat) {
-        const unreadMessages = chat.messages.filter(m => m.sender === chatId && !m.isRead);
+        const unreadMessages = chat.messages.filter(m => m.sender === username && !m.isRead);
         for (const msg of unreadMessages) {
             msg.isRead = true;
         }
         saveToLocalStorage();
     }
-    
+
     document.querySelectorAll('.chat-item').forEach(item => {
         item.classList.remove('active');
         const nameDiv = item.querySelector('.chat-name');
-        if (nameDiv && nameDiv.textContent === displayName) {
+        if (nameDiv && nameDiv.textContent === username) {
             item.classList.add('active');
         }
     });
 }
 
-async function displayChatMessages(chatId) {
+function displayChatMessages(username) {
     const container = document.getElementById('messagesContainer');
     if (!container) return;
-    
+
     container.innerHTML = '';
-    
-    const chat = chats.get(chatId);
+
+    const chat = chats.get(username);
     if (chat && chat.messages) {
-        for (const msg of chat.messages) {
-            let displayText = msg.text;
-            let senderName = msg.sender;
-            
-            if (chat.source === 'telegram' && msg.sender.startsWith('tg_')) {
-                const senderChat = chats.get(msg.sender);
-                if (senderChat && senderChat.tgData) {
-                    senderName = senderChat.tgData.title || senderChat.tgData.username || msg.sender;
-                }
-            }
-            
-            displayMessage({ ...msg, text: displayText, sender: msg.sender });
-        }
+        chat.messages.forEach(msg => displayMessage(msg));
     }
-    
+
     container.scrollTop = container.scrollHeight;
 }
 
 function displayMessage(message) {
     const container = document.getElementById('messagesContainer');
     if (!container || !currentUser) return;
-    
+
     const messageDiv = document.createElement('div');
-    const isSent = message.sender === currentUser.username || message.sender === currentUser.username;
-    messageDiv.className = `message ${isSent ? 'sent' : 'received'}`;
-    
+    messageDiv.className = `message ${message.sender === currentUser.username ? 'sent' : 'received'}`;
+
     const textDiv = document.createElement('div');
     textDiv.className = 'message-text';
     textDiv.textContent = message.text;
-    
+
     const timeDiv = document.createElement('div');
     timeDiv.className = 'message-time';
     const time = new Date(message.time);
     timeDiv.textContent = time.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    
-    if (isSent) {
+
+    if (message.sender === currentUser.username) {
         const statusSpan = document.createElement('span');
         statusSpan.style.marginLeft = '8px';
         statusSpan.style.fontSize = '10px';
@@ -1333,19 +950,19 @@ function displayMessage(message) {
         }
         timeDiv.appendChild(statusSpan);
     }
-    
+
     messageDiv.appendChild(textDiv);
     messageDiv.appendChild(timeDiv);
-    
+
     container.appendChild(messageDiv);
     container.scrollTop = container.scrollHeight;
 }
 
-function updateLastMessage(chatId, text) {
+function updateLastMessage(username, text) {
     const items = document.querySelectorAll('.chat-item');
     for (const item of items) {
         const nameDiv = item.querySelector('.chat-name');
-        if (nameDiv && nameDiv.textContent === chatId) {
+        if (nameDiv && nameDiv.textContent === username) {
             const lastMsgDiv = item.querySelector('.last-message');
             if (lastMsgDiv) {
                 lastMsgDiv.textContent = text.substring(0, 50);
@@ -1426,12 +1043,12 @@ function closeModal() {
 async function createNewChat() {
     const input = document.getElementById('newChatUsername');
     const username = input.value.trim();
-    
+
     if (!username) {
         alert('Введите имя пользователя');
         return;
     }
-    
+
     const success = await addNewChat(username);
     if (success) {
         closeModal();
@@ -1443,7 +1060,7 @@ function setupEventListeners() {
     const newChatBtn = document.getElementById('newChatBtn');
     const sendBtn = document.getElementById('sendBtn');
     const messageInput = document.getElementById('messageInput');
-    
+
     if (newChatBtn) newChatBtn.onclick = showNewChatModal;
     if (sendBtn) {
         sendBtn.onclick = () => {
@@ -1457,11 +1074,11 @@ function setupEventListeners() {
             }
         };
     }
-    
+
     let typingTimeout;
     if (messageInput) {
         messageInput.oninput = () => {
-            if (currentChat && !currentChat.startsWith('tg_')) {
+            if (currentChat) {
                 const peerId = getPeerId(currentChat);
                 const conn = connections.get(peerId);
                 if (conn && conn.open) {
@@ -1469,7 +1086,7 @@ function setupEventListeners() {
                         type: 'typing',
                         isTyping: true
                     });
-                    
+
                     if (typingTimeout) clearTimeout(typingTimeout);
                     typingTimeout = setTimeout(() => {
                         if (conn && conn.open) {
@@ -1483,76 +1100,6 @@ function setupEventListeners() {
             }
         };
     }
-}
-
-function addTelegramConnectButton() {
-    const sidebarHeader = document.querySelector('.sidebar-header');
-    if (!sidebarHeader) return;
-    
-    const tgConnectBtn = document.createElement('button');
-    tgConnectBtn.className = 'tg-connect-btn';
-    tgConnectBtn.style.cssText = `
-        background: #29a9e9;
-        border: none;
-        color: white;
-        cursor: pointer;
-        padding: 8px 12px;
-        border-radius: 6px;
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        margin-left: 10px;
-    `;
-    tgConnectBtn.innerHTML = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <path d="M21.5 4.5L2.5 12.5L9.5 14.5L13.5 21.5L21.5 4.5Z"/>
-            <path d="M9.5 14.5L13.5 21.5L21.5 4.5L9.5 14.5Z"/>
-        </svg>
-        <span>Telegram</span>
-    `;
-    
-    tgConnectBtn.onclick = async () => {
-        tgConnectBtn.disabled = true;
-        tgConnectBtn.style.opacity = '0.7';
-        tgConnectBtn.innerHTML = '<span class="loading"></span> Подключение...';
-        
-        await loadTelegramCredentials();
-        const success = await initTelegramClient();
-        
-        if (success) {
-            tgConnectBtn.style.background = '#4caf50';
-            tgConnectBtn.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <polyline points="20 6 9 17 4 12"></polyline>
-                </svg>
-                <span>Telegram</span>
-            `;
-        } else {
-            tgConnectBtn.style.background = '#f44336';
-            tgConnectBtn.innerHTML = `
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                    <line x1="18" y1="6" x2="6" y2="18"></line>
-                    <line x1="6" y1="6" x2="18" y2="18"></line>
-                </svg>
-                <span>Ошибка</span>
-            `;
-            setTimeout(() => {
-                tgConnectBtn.style.background = '#29a9e9';
-                tgConnectBtn.innerHTML = `
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M21.5 4.5L2.5 12.5L9.5 14.5L13.5 21.5L21.5 4.5Z"/>
-                        <path d="M9.5 14.5L13.5 21.5L21.5 4.5L9.5 14.5Z"/>
-                    </svg>
-                    <span>Telegram</span>
-                `;
-            }, 3000);
-        }
-        
-        tgConnectBtn.disabled = false;
-        tgConnectBtn.style.opacity = '1';
-    };
-    
-    sidebarHeader.appendChild(tgConnectBtn);
 }
 
 function startOfflineMessageChecker() {
@@ -1572,17 +1119,7 @@ async function init() {
     await syncChatsFromServer();
     updateUI();
     setupEventListeners();
-    addTelegramConnectButton();
     startOfflineMessageChecker();
-    
-    await loadTelegramCredentials();
-    const savedSession = localStorage.getItem('telegram_session_data');
-    if (savedSession) {
-        const success = await initTelegramClient();
-        if (success) {
-            updateTelegramButtonStatus(true);
-        }
-    }
 }
 
 init();
