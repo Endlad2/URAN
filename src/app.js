@@ -891,11 +891,11 @@ async function refreshChatsList() {
     }
 }
 
-function createChatItem(username, chatData, userInfo) {
+function createChatItem(chatId, chatData, userInfo) {
     const div = document.createElement('div');
     div.className = 'chat-item';
-    if (currentChat === username) div.classList.add('active');
-
+    if (currentChat === chatId) div.classList.add('active');
+    
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
     avatarDiv.style.position = 'relative';
@@ -906,9 +906,20 @@ function createChatItem(username, chatData, userInfo) {
     avatarDiv.style.display = 'flex';
     avatarDiv.style.alignItems = 'center';
     avatarDiv.style.justifyContent = 'center';
-    avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    
+    // Определяем фон аватара в зависимости от источника чата
+    if (chatData.source === 'telegram') {
+        avatarDiv.style.background = '#29a9e9';
+    } else if (chatData.source === 'whatsapp') {
+        avatarDiv.style.background = '#25D366';
+    } else if (chatData.source === 'viber') {
+        avatarDiv.style.background = '#7360f2';
+    } else {
+        avatarDiv.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+    }
     avatarDiv.style.color = 'white';
-
+    
+    // Фото пользователя/чата
     const avatarImg = document.createElement('img');
     avatarImg.className = 'chat-avatar-img';
     avatarImg.style.width = '100%';
@@ -916,46 +927,121 @@ function createChatItem(username, chatData, userInfo) {
     avatarImg.style.objectFit = 'cover';
     avatarImg.style.display = 'none';
     avatarDiv.appendChild(avatarImg);
-
+    
+    // Инициалы (если нет фото)
     const initialsSpan = document.createElement('span');
     initialsSpan.className = 'chat-avatar-initials';
-    initialsSpan.textContent = getInitials(username);
+    let displayName = chatId;
+    if (chatData.tgData && chatData.tgData.title) {
+        displayName = chatData.tgData.title;
+    } else if (userInfo && userInfo.username) {
+        displayName = userInfo.username;
+    }
+    initialsSpan.textContent = getInitials(displayName);
     initialsSpan.style.fontSize = '20px';
     initialsSpan.style.fontWeight = 'bold';
     avatarDiv.appendChild(initialsSpan);
-
-    if (userInfo && userInfo.photo) {
-        loadChatAvatar(username, userInfo.photo, avatarImg, initialsSpan);
+    
+    // Иконка мессенджера
+    const messengerIcon = document.createElement('img');
+    messengerIcon.style.position = 'absolute';
+    messengerIcon.style.bottom = '-2px';
+    messengerIcon.style.right = '-2px';
+    messengerIcon.style.width = '18px';
+    messengerIcon.style.height = '18px';
+    messengerIcon.style.borderRadius = '50%';
+    messengerIcon.style.backgroundColor = 'white';
+    messengerIcon.style.padding = '2px';
+    messengerIcon.style.zIndex = '1';
+    
+    if (chatData.source === 'telegram') {
+        messengerIcon.src = 'https://www.uran-chat.space/tg.ico';
+        messengerIcon.alt = 'Telegram';
+    } else if (chatData.source === 'whatsapp') {
+        messengerIcon.src = 'https://www.uran-chat.space/wa.ico';
+        messengerIcon.alt = 'WhatsApp';
+    } else if (chatData.source === 'viber') {
+        messengerIcon.src = 'https://www.uran-chat.space/viber.ico';
+        messengerIcon.alt = 'Viber';
+    } else {
+        messengerIcon.src = 'https://www.uran-chat.space/favicon.ico';
+        messengerIcon.alt = 'Uran';
     }
-
+    avatarDiv.appendChild(messengerIcon);
+    
+    // Информация о чате
     const infoDiv = document.createElement('div');
     infoDiv.className = 'chat-info';
-
+    
     const nameDiv = document.createElement('div');
     nameDiv.className = 'chat-name';
-    nameDiv.textContent = username;
-
+    if (chatData.tgData && chatData.tgData.title) {
+        nameDiv.textContent = chatData.tgData.title;
+        if (chatData.tgData.username) {
+            const usernameSpan = document.createElement('span');
+            usernameSpan.style.fontSize = '11px';
+            usernameSpan.style.color = '#888';
+            usernameSpan.style.marginLeft = '5px';
+            usernameSpan.textContent = `@${chatData.tgData.username}`;
+            nameDiv.appendChild(usernameSpan);
+        }
+    } else if (userInfo && userInfo.username) {
+        nameDiv.textContent = userInfo.username;
+    } else {
+        nameDiv.textContent = chatId;
+    }
+    
     const lastMsgDiv = document.createElement('div');
     lastMsgDiv.className = 'last-message';
-    const lastMsg = chatData.lastMessage || 'Нет сообщений';
-    lastMsgDiv.textContent = lastMsg.length > 50 ? lastMsg.substring(0, 47) + '...' : lastMsg;
-
-    const unreadCount = chatData.messages.filter(m => m.sender === username && !m.isRead).length;
+    let lastMsg = chatData.lastMessage || 'Нет сообщений';
+    
+    // Добавляем индикатор, если сообщение из Telegram
+    if (chatData.source === 'telegram' && chatData.lastMessage) {
+        const tgIcon = document.createElement('span');
+        tgIcon.style.display = 'inline-block';
+        tgIcon.style.width = '12px';
+        tgIcon.style.height = '12px';
+        tgIcon.style.backgroundImage = 'url(https://www.uran-chat.space/tg.ico)';
+        tgIcon.style.backgroundSize = 'contain';
+        tgIcon.style.marginRight = '4px';
+        tgIcon.style.verticalAlign = 'middle';
+        lastMsgDiv.appendChild(tgIcon);
+    }
+    
+    const lastMsgText = document.createTextNode(lastMsg.length > 50 ? lastMsg.substring(0, 47) + '...' : lastMsg);
+    lastMsgDiv.appendChild(lastMsgText);
+    
+    // Непрочитанные сообщения
+    const unreadCount = chatData.messages.filter(m => m.sender === chatId && !m.isRead).length;
     if (unreadCount > 0) {
         const unreadBadge = document.createElement('span');
         unreadBadge.style.cssText = 'background: #667eea; color: white; border-radius: 10px; padding: 2px 6px; font-size: 10px; margin-left: 5px;';
         unreadBadge.textContent = unreadCount;
         nameDiv.appendChild(unreadBadge);
     }
-
+    
+    // Статус онлайн (только для Telegram)
+    if (chatData.source === 'telegram' && chatData.tgData && chatData.tgData.status === 'online') {
+        const onlineDot = document.createElement('span');
+        onlineDot.style.cssText = 'display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #4caf50; margin-left: 8px;';
+        nameDiv.appendChild(onlineDot);
+    }
+    
     infoDiv.appendChild(nameDiv);
     infoDiv.appendChild(lastMsgDiv);
-
+    
     div.appendChild(avatarDiv);
     div.appendChild(infoDiv);
-
-    div.onclick = () => openChat(username);
-
+    
+    div.onclick = () => openChat(chatId);
+    
+    // Загружаем фото если есть
+    if (userInfo && userInfo.photo) {
+        loadChatAvatar(displayName, userInfo.photo, avatarImg, initialsSpan);
+    } else if (chatData.tgData && chatData.tgData.photo) {
+        loadChatAvatar(displayName, chatData.tgData.photo, avatarImg, initialsSpan);
+    }
+    
     return div;
 }
 
