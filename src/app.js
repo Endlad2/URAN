@@ -250,13 +250,13 @@ async function loadCurrentUser() {
                 }
             }
         } else {
-            console.error('Нет активной сессии, перенаправление на страницу входа');
-            window.location.href = '/';
+            console.error('Нет активной сессии, перенаправление на login.php');
+            window.location.href = '/login.php';
             return;
         }
     } catch (error) {
         console.error('Ошибка загрузки пользователя:', error);
-        window.location.href = '/';
+        window.location.href = '/login.php';
         return;
     }
 
