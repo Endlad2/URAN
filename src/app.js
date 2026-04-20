@@ -5,6 +5,7 @@ let connections = new Map();
 let chats = new Map();
 let encryptionKey = null;
 let offlineCheckInterval = null;
+let pendingContextMenu = null;
 
 const peerConfig = {
     config: {
@@ -31,6 +32,8 @@ function getInitials(username) {
 }
 
 async function saveOfflineMessageToFTP(receiver, sender, message) {
+    if (receiver.startsWith('tg_')) return false;
+    
     try {
         const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
             method: 'POST',
@@ -48,6 +51,8 @@ async function saveOfflineMessageToFTP(receiver, sender, message) {
 }
 
 async function getOfflineMessagesFromFTP(receiver, sender = null) {
+    if (receiver.startsWith('tg_')) return [];
+    
     try {
         const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
             method: 'POST',
@@ -65,6 +70,8 @@ async function getOfflineMessagesFromFTP(receiver, sender = null) {
 }
 
 async function deleteOfflineMessagesFromFTP(receiver, sender) {
+    if (receiver.startsWith('tg_')) return false;
+    
     try {
         const response = await fetch('https://www.uran-chat.space/offline_messages.php', {
             method: 'POST',
@@ -118,7 +125,10 @@ async function checkOfflineMessages() {
                 chats.set(sender, {
                     messages: [],
                     avatar: null,
-                    lastMessage: ''
+                    lastMessage: '',
+                    pinned: false,
+                    hidden: false,
+                    customName: null
                 });
             }
         }
@@ -408,7 +418,10 @@ async function saveUserInfo(peerId, data) {
         chats.set(username, {
             messages: [],
             avatar: null,
-            lastMessage: ''
+            lastMessage: '',
+            pinned: false,
+            hidden: false,
+            customName: null
         });
         await saveToLocalStorage();
         await refreshChatsList();
@@ -419,20 +432,14 @@ async function sendMessage(text) {
     if (!currentChat || !text.trim() || !currentUser) return;
     
     if (currentChat.startsWith('tg_')) {
-        const peer = currentChat.replace('tg_', '');
-        const success = await sendTelegramMessage(peer, text);
-        if (success) {
-            showMessageDelivered(currentChat);
-        } else {
-            showMessageQueued(currentChat, text);
-            await saveOfflineMessageToFTP(currentChat, currentUser.username, {
-                id: Date.now(),
-                text: text.trim(),
-                time: new Date().toISOString(),
-                sender: currentUser.username,
-                receiver: currentChat
-            });
-        }
+        showMessageQueued(currentChat, text);
+        await saveOfflineMessageToFTP(currentChat, currentUser.username, {
+            id: Date.now(),
+            text: text.trim(),
+            time: new Date().toISOString(),
+            sender: currentUser.username,
+            receiver: currentChat
+        });
         
         const messageInput = document.getElementById('messageInput');
         if (messageInput) messageInput.value = '';
@@ -536,7 +543,10 @@ async function saveMessage(chatWith, message) {
         chats.set(chatWith, {
             messages: [],
             avatar: null,
-            lastMessage: ''
+            lastMessage: '',
+            pinned: false,
+            hidden: false,
+            customName: null
         });
     }
 
@@ -599,7 +609,10 @@ async function saveToLocalStorage() {
                 avatar: chatData.avatar,
                 lastMessage: chatData.lastMessage,
                 source: chatData.source,
-                tgData: chatData.tgData
+                tgData: chatData.tgData,
+                pinned: chatData.pinned || false,
+                hidden: chatData.hidden || false,
+                customName: chatData.customName || null
             }
         ]);
         const encrypted = await encryptData(dataToSave, key);
@@ -655,7 +668,10 @@ async function syncChatsFromServer() {
                         messages: [],
                         avatar: null,
                         lastMessage: '',
-                        source: result.my_chats?.includes(chatUsername) ? 'me' : 'another'
+                        source: result.my_chats?.includes(chatUsername) ? 'me' : 'another',
+                        pinned: false,
+                        hidden: false,
+                        customName: null
                     });
                 }
             }
@@ -721,7 +737,10 @@ async function addNewChat(chatWith) {
                 messages: [],
                 avatar: null,
                 lastMessage: '',
-                source: 'me'
+                source: 'me',
+                pinned: false,
+                hidden: false,
+                customName: null
             });
             await saveToLocalStorage();
         }
@@ -774,14 +793,19 @@ async function refreshChatsList() {
 
     chatsList.innerHTML = '';
 
-    const sortedChats = Array.from(chats.entries()).sort((a, b) => {
-        const lastMsgA = a[1].messages[a[1].messages.length - 1];
-        const lastMsgB = b[1].messages[b[1].messages.length - 1];
-        if (!lastMsgA && !lastMsgB) return 0;
-        if (!lastMsgA) return 1;
-        if (!lastMsgB) return -1;
-        return new Date(lastMsgB.time) - new Date(lastMsgA.time);
-    });
+    const sortedChats = Array.from(chats.entries())
+        .filter(([_, chatData]) => !chatData.hidden)
+        .sort((a, b) => {
+            if (a[1].pinned && !b[1].pinned) return -1;
+            if (!a[1].pinned && b[1].pinned) return 1;
+            
+            const lastMsgA = a[1].messages[a[1].messages.length - 1];
+            const lastMsgB = b[1].messages[b[1].messages.length - 1];
+            if (!lastMsgA && !lastMsgB) return 0;
+            if (!lastMsgA) return 1;
+            if (!lastMsgB) return -1;
+            return new Date(lastMsgB.time) - new Date(lastMsgA.time);
+        });
 
     for (const [chatId, chatData] of sortedChats) {
         let userInfo = null;
@@ -795,6 +819,10 @@ async function refreshChatsList() {
             displayName = userInfo.username || chatId;
         }
         
+        if (chatData.customName) {
+            displayName = chatData.customName;
+        }
+        
         const chatItem = createChatItem(chatId, chatData, userInfo, displayName);
         chatsList.appendChild(chatItem);
     }
@@ -804,10 +832,95 @@ async function refreshChatsList() {
     }
 }
 
+function showChatContextMenu(chatId, chatData, displayName, event) {
+    if (pendingContextMenu) {
+        pendingContextMenu.remove();
+        pendingContextMenu = null;
+    }
+    
+    const menu = document.createElement('div');
+    menu.className = 'chat-context-menu';
+    menu.style.cssText = `
+        position: fixed;
+        background: white;
+        border-radius: 12px;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.15);
+        z-index: 2000;
+        min-width: 180px;
+        overflow: hidden;
+        left: ${event.clientX}px;
+        top: ${event.clientY}px;
+    `;
+    
+    const pinText = chatData.pinned ? '📌 Открепить' : '📌 Закрепить';
+    const hideText = '🙈 Скрыть чат';
+    const renameText = '✏️ Переименовать';
+    
+    menu.innerHTML = `
+        <div style="padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #eee; transition: background 0.2s;" data-action="pin">${pinText}</div>
+        <div style="padding: 12px 16px; cursor: pointer; border-bottom: 1px solid #eee; transition: background 0.2s;" data-action="rename">${renameText}</div>
+        <div style="padding: 12px 16px; cursor: pointer; transition: background 0.2s; color: #e53935;" data-action="hide">${hideText}</div>
+    `;
+    
+    menu.querySelectorAll('[data-action]').forEach(btn => {
+        btn.onmouseenter = () => btn.style.background = '#f5f5f5';
+        btn.onmouseleave = () => btn.style.background = '';
+        btn.onclick = async () => {
+            const action = btn.dataset.action;
+            menu.remove();
+            pendingContextMenu = null;
+            
+            if (action === 'pin') {
+                chatData.pinned = !chatData.pinned;
+                await saveToLocalStorage();
+                await refreshChatsList();
+            } else if (action === 'rename') {
+                const newName = prompt('Введите новое имя для чата:', displayName);
+                if (newName && newName.trim()) {
+                    chatData.customName = newName.trim();
+                    await saveToLocalStorage();
+                    await refreshChatsList();
+                    if (currentChat === chatId) {
+                        document.getElementById('chatHeaderName').textContent = newName.trim();
+                    }
+                }
+            } else if (action === 'hide') {
+                if (confirm('Скрыть чат? Вы сможете найти его в поиске или создать заново.')) {
+                    chatData.hidden = true;
+                    if (currentChat === chatId) {
+                        currentChat = null;
+                        document.getElementById('chatHeaderName').textContent = 'Выберите чат';
+                        document.getElementById('messagesContainer').innerHTML = '';
+                        document.getElementById('messageInput').disabled = true;
+                        document.getElementById('sendBtn').disabled = true;
+                    }
+                    await saveToLocalStorage();
+                    await refreshChatsList();
+                }
+            }
+        };
+    });
+    
+    document.body.appendChild(menu);
+    pendingContextMenu = menu;
+    
+    setTimeout(() => {
+        const closeHandler = (e) => {
+            if (!menu.contains(e.target)) {
+                menu.remove();
+                pendingContextMenu = null;
+                document.removeEventListener('click', closeHandler);
+            }
+        };
+        document.addEventListener('click', closeHandler);
+    }, 10);
+}
+
 function createChatItem(chatId, chatData, userInfo, displayName) {
     const div = document.createElement('div');
     div.className = 'chat-item';
     if (currentChat === chatId) div.classList.add('active');
+    if (chatData.pinned) div.style.borderLeft = '3px solid #ff9800';
     
     const avatarDiv = document.createElement('div');
     avatarDiv.className = 'chat-avatar';
@@ -849,7 +962,6 @@ function createChatItem(chatId, chatData, userInfo, displayName) {
     nameDiv.className = 'chat-name';
     nameDiv.textContent = displayName;
     
-    // Иконка мессенджера после имени чата
     const messengerIcon = document.createElement('img');
     messengerIcon.style.width = '16px';
     messengerIcon.style.height = '16px';
@@ -865,6 +977,14 @@ function createChatItem(chatId, chatData, userInfo, displayName) {
         messengerIcon.title = 'Uran Chat';
     }
     nameDiv.appendChild(messengerIcon);
+    
+    if (chatData.pinned) {
+        const pinIcon = document.createElement('span');
+        pinIcon.textContent = '📌';
+        pinIcon.style.marginLeft = '5px';
+        pinIcon.style.fontSize = '12px';
+        nameDiv.appendChild(pinIcon);
+    }
     
     if (chatData.source === 'telegram' && chatData.tgData && chatData.tgData.username) {
         const usernameSpan = document.createElement('span');
@@ -896,6 +1016,28 @@ function createChatItem(chatId, chatData, userInfo, displayName) {
     
     div.onclick = () => openChat(chatId);
     
+    let pressTimer = null;
+    div.onmousedown = (e) => {
+        if (e.button !== 0) return;
+        pressTimer = setTimeout(() => {
+            showChatContextMenu(chatId, chatData, displayName, e);
+            pressTimer = null;
+        }, 500);
+    };
+    
+    div.onmouseup = () => {
+        if (pressTimer) {
+            clearTimeout(pressTimer);
+            pressTimer = null;
+        }
+    };
+    
+    div.oncontextmenu = (e) => {
+        e.preventDefault();
+        showChatContextMenu(chatId, chatData, displayName, e);
+        return false;
+    };
+    
     if (userInfo && userInfo.photo) {
         loadChatAvatar(displayName, userInfo.photo, avatarImg, initialsSpan);
     } else if (chatData.avatar) {
@@ -918,6 +1060,9 @@ async function openChat(chatId) {
     
     if (currentChatData && currentChatData.source === 'telegram' && currentChatData.tgData) {
         displayName = currentChatData.tgData.name || chatId;
+        if (currentChatData.customName) {
+            displayName = currentChatData.customName;
+        }
         if (headerName) headerName.textContent = displayName;
         
         const statusDiv = document.getElementById('chatHeaderStatus');
@@ -926,7 +1071,17 @@ async function openChat(chatId) {
             statusDiv.style.color = '#888';
         }
     } else {
-        if (headerName) headerName.textContent = chatId;
+        if (currentChatData && currentChatData.customName) {
+            displayName = currentChatData.customName;
+        }
+        if (headerName) headerName.textContent = displayName;
+        
+        const statusDiv = document.getElementById('chatHeaderStatus');
+        if (statusDiv) {
+            const conn = connections.get(getPeerId(chatId));
+            statusDiv.textContent = conn && conn.open ? 'Онлайн' : 'Оффлайн';
+            statusDiv.style.color = conn && conn.open ? '#4caf50' : '#f44336';
+        }
     }
     
     if (headerAvatar) {
@@ -1002,7 +1157,6 @@ async function openChat(chatId) {
         }
     });
     
-    // Загружаем сообщения Telegram если это Telegram чат
     if (currentChatData && currentChatData.source === 'telegram') {
         const session = await loadTelegramSession();
         if (session) {
@@ -1031,7 +1185,6 @@ function displayChatMessages(chatId) {
     if (chatData && chatData.messages) {
         for (const msg of chatData.messages) {
             let displayText = msg.text;
-            
             displayMessage({ ...msg, text: displayText });
         }
     }
@@ -1093,7 +1246,7 @@ function updateLastMessage(chatId, text) {
 
 function updateConnectionStatus(isConnected) {
     const statusDiv = document.getElementById('chatHeaderStatus');
-    if (statusDiv) {
+    if (statusDiv && currentChat && !chats.get(currentChat)?.source === 'telegram') {
         if (isConnected) {
             statusDiv.textContent = 'Онлайн';
             statusDiv.style.color = '#4caf50';
@@ -1350,15 +1503,24 @@ async function getTelegramDialogs() {
             for (const dialog of result.data) {
                 const chatId = `tg_${dialog.id}`;
                 if (!chats.has(chatId)) {
+                    let avatarUrl = null;
+                    if (dialog.photo) {
+                        avatarUrl = dialog.photo;
+                    }
                     chats.set(chatId, {
                         messages: [],
-                        avatar: null,
+                        avatar: avatarUrl,
                         lastMessage: '',
                         source: 'telegram',
+                        pinned: false,
+                        hidden: false,
+                        customName: null,
                         tgData: {
                             id: dialog.id,
                             name: dialog.name,
-                            unread: dialog.unread || 0
+                            username: dialog.username,
+                            unread: dialog.unread || 0,
+                            photo: dialog.photo
                         }
                     });
                 }
@@ -1395,12 +1557,28 @@ async function getTelegramMessages(peer, limit = 100) {
         if (result.success && result.data) {
             const formattedMessages = [];
             for (const msg of result.data) {
+                let senderId = msg.out ? currentUser.username : `tg_${peer}`;
+                let receiverId = msg.out ? `tg_${peer}` : currentUser.username;
+                
+                let messageText = msg.text || '[Медиа]';
+                if (msg.photo) {
+                    messageText = '📷 Фото';
+                } else if (msg.video) {
+                    messageText = '🎥 Видео';
+                } else if (msg.sticker) {
+                    messageText = '🎨 Стикер';
+                } else if (msg.voice) {
+                    messageText = '🎤 Голосовое';
+                } else if (msg.document) {
+                    messageText = '📎 Документ';
+                }
+                
                 formattedMessages.push({
                     id: msg.id,
-                    text: msg.text || '[Медиа]',
+                    text: messageText,
                     time: new Date(msg.date * 1000).toISOString(),
-                    sender: msg.out ? currentUser.username : `tg_${peer}`,
-                    receiver: msg.out ? `tg_${peer}` : currentUser.username,
+                    sender: senderId,
+                    receiver: receiverId,
                     isRead: true,
                     isDelivered: true
                 });
@@ -1411,45 +1589,6 @@ async function getTelegramMessages(peer, limit = 100) {
         console.error('Ошибка получения сообщений Telegram:', error);
     }
     return [];
-}
-
-async function sendTelegramMessage(peer, text) {
-    const session = await loadTelegramSession();
-    if (!session) return false;
-    
-    try {
-        const response = await fetch('/tg-api-proxy.php?action=send-message', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                session_data: session,
-                peer: peer,
-                message: text
-            })
-        });
-        
-        const result = await response.json();
-        
-        if (result.success) {
-            const message = {
-                id: Date.now(),
-                text: text,
-                time: new Date().toISOString(),
-                sender: currentUser.username,
-                receiver: `tg_${peer}`,
-                isRead: true,
-                isDelivered: true
-            };
-            await saveMessage(`tg_${peer}`, message);
-            displayMessage(message);
-            return true;
-        }
-    } catch (error) {
-        console.error('Ошибка отправки сообщения в Telegram:', error);
-    }
-    return false;
 }
 
 function openTelegramConnectWindow() {
