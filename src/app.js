@@ -417,6 +417,28 @@ async function saveUserInfo(peerId, data) {
 
 async function sendMessage(text) {
     if (!currentChat || !text.trim() || !currentUser) return;
+    
+    if (currentChat.startsWith('tg_')) {
+        const peer = currentChat.replace('tg_', '');
+        const success = await sendTelegramMessage(peer, text);
+        if (success) {
+            showMessageDelivered(currentChat);
+        } else {
+            showMessageQueued(currentChat, text);
+            await saveOfflineMessageToFTP(currentChat, currentUser.username, {
+                id: Date.now(),
+                text: text.trim(),
+                time: new Date().toISOString(),
+                sender: currentUser.username,
+                receiver: currentChat
+            });
+        }
+        
+        const messageInput = document.getElementById('messageInput');
+        if (messageInput) messageInput.value = '';
+        await refreshChatsList();
+        return;
+    }
 
     const message = {
         id: Date.now(),
@@ -766,7 +788,7 @@ async function refreshChatsList() {
         let displayName = chatId;
         
         if (chatData.source === 'telegram' && chatData.tgData) {
-            displayName = chatData.tgData.title || chatData.tgData.username || chatId;
+            displayName = chatData.tgData.name || chatId;
             userInfo = { username: displayName, photo: chatData.avatar };
         } else {
             userInfo = await fetchUserInfo(chatId);
@@ -895,7 +917,7 @@ async function openChat(chatId) {
     const currentChatData = chats.get(chatId);
     
     if (currentChatData && currentChatData.source === 'telegram' && currentChatData.tgData) {
-        displayName = currentChatData.tgData.title || currentChatData.tgData.username || chatId;
+        displayName = currentChatData.tgData.name || chatId;
         if (headerName) headerName.textContent = displayName;
         
         const statusDiv = document.getElementById('chatHeaderStatus');
@@ -979,6 +1001,24 @@ async function openChat(chatId) {
             item.classList.add('active');
         }
     });
+    
+    // Загружаем сообщения Telegram если это Telegram чат
+    if (currentChatData && currentChatData.source === 'telegram') {
+        const session = await loadTelegramSession();
+        if (session) {
+            const peer = chatId.replace('tg_', '');
+            const tgMessages = await getTelegramMessages(peer);
+            if (tgMessages && tgMessages.length > 0) {
+                for (const msg of tgMessages) {
+                    const exists = currentChatData.messages.some(m => m.id === msg.id);
+                    if (!exists) {
+                        await saveMessage(chatId, msg);
+                    }
+                }
+                await displayChatMessages(chatId);
+            }
+        }
+    }
 }
 
 function displayChatMessages(chatId) {
@@ -991,16 +1031,8 @@ function displayChatMessages(chatId) {
     if (chatData && chatData.messages) {
         for (const msg of chatData.messages) {
             let displayText = msg.text;
-            let senderName = msg.sender;
             
-            if (chatData.source === 'telegram' && msg.sender && msg.sender.startsWith('tg_')) {
-                const senderChat = chats.get(msg.sender);
-                if (senderChat && senderChat.tgData) {
-                    senderName = senderChat.tgData.title || senderChat.tgData.username || msg.sender;
-                }
-            }
-            
-            displayMessage({ ...msg, text: displayText, sender: msg.sender });
+            displayMessage({ ...msg, text: displayText });
         }
     }
     
@@ -1165,7 +1197,7 @@ function setupEventListeners() {
     let typingTimeout;
     if (messageInput) {
         messageInput.oninput = () => {
-            if (currentChat) {
+            if (currentChat && !currentChat.startsWith('tg_')) {
                 const peerId = getPeerId(currentChat);
                 const conn = connections.get(peerId);
                 if (conn && conn.open) {
@@ -1201,8 +1233,6 @@ function startOfflineMessageChecker() {
 
 // ==================== Telegram Integration ====================
 
-let tgSessions = new Map();
-
 async function initTelegramIndexedDB() {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open('UranTelegramDB', 1);
@@ -1211,12 +1241,6 @@ async function initTelegramIndexedDB() {
             const db = event.target.result;
             if (!db.objectStoreNames.contains('sessions')) {
                 db.createObjectStore('sessions', { keyPath: 'userId' });
-            }
-            if (!db.objectStoreNames.contains('chats')) {
-                db.createObjectStore('chats', { keyPath: 'chatId' });
-            }
-            if (!db.objectStoreNames.contains('messages')) {
-                db.createObjectStore('messages', { keyPath: 'id' });
             }
         };
         
@@ -1234,7 +1258,7 @@ async function initTelegramIndexedDB() {
 }
 
 async function loadTelegramSession() {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         if (!currentUser) {
             resolve(null);
             return;
@@ -1269,7 +1293,7 @@ async function loadTelegramSession() {
 }
 
 async function saveTelegramSession(sessionData) {
-    return new Promise((resolve, reject) => {
+    return new Promise((resolve) => {
         if (!currentUser) {
             resolve(false);
             return;
@@ -1304,85 +1328,79 @@ async function saveTelegramSession(sessionData) {
     });
 }
 
-async function getTelegramChats() {
+async function getTelegramDialogs() {
     const session = await loadTelegramSession();
     if (!session) return [];
     
     try {
-        const response = await fetch('https://cap.uran-chat.space:8080/get-chats', {
+        const response = await fetch('/tg-api-proxy.php?action=get-dialogs', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify({ session_data: session })
+            body: JSON.stringify({ 
+                session_data: session,
+                limit: 100
+            })
         });
         
         const result = await response.json();
         
-        if (result.success && result.chats) {
-            for (const tgChat of result.chats) {
-                const chatId = `tg_${tgChat.id}`;
+        if (result.success && result.data) {
+            for (const dialog of result.data) {
+                const chatId = `tg_${dialog.id}`;
                 if (!chats.has(chatId)) {
                     chats.set(chatId, {
                         messages: [],
-                        avatar: tgChat.photo || null,
-                        lastMessage: tgChat.last_message || '',
+                        avatar: null,
+                        lastMessage: '',
                         source: 'telegram',
                         tgData: {
-                            id: tgChat.id,
-                            type: tgChat.type,
-                            title: tgChat.title,
-                            username: tgChat.username,
-                            unreadCount: tgChat.unread_count || 0
+                            id: dialog.id,
+                            name: dialog.name,
+                            unread: dialog.unread || 0
                         }
                     });
                 }
             }
             await saveToLocalStorage();
             await refreshChatsList();
-            return result.chats;
+            return result.data;
         }
     } catch (error) {
-        console.error('Ошибка получения чатов Telegram:', error);
+        console.error('Ошибка получения диалогов Telegram:', error);
     }
     return [];
 }
 
-async function getTelegramMessages(chatId, limit = 50) {
+async function getTelegramMessages(peer, limit = 100) {
     const session = await loadTelegramSession();
     if (!session) return [];
     
-    const tgChatId = parseInt(chatId.replace('tg_', ''));
-    
     try {
-        const response = await fetch('https://cap.uran-chat.space:8080/get-messages', {
+        const response = await fetch('/tg-api-proxy.php?action=get-messages', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
                 session_data: session,
-                chat_id: tgChatId,
+                peer: peer,
                 limit: limit
             })
         });
         
         const result = await response.json();
         
-        if (result.success && result.messages) {
+        if (result.success && result.data) {
             const formattedMessages = [];
-            for (const msg of result.messages) {
-                let senderId = chatId;
-                if (msg.sender_id) {
-                    senderId = `tg_${msg.sender_id}`;
-                }
-                
+            for (const msg of result.data) {
                 formattedMessages.push({
                     id: msg.id,
                     text: msg.text || '[Медиа]',
-                    time: msg.date,
-                    sender: senderId,
-                    receiver: chatId,
+                    time: new Date(msg.date * 1000).toISOString(),
+                    sender: msg.out ? currentUser.username : `tg_${peer}`,
+                    receiver: msg.out ? `tg_${peer}` : currentUser.username,
                     isRead: true,
                     isDelivered: true
                 });
@@ -1395,39 +1413,37 @@ async function getTelegramMessages(chatId, limit = 50) {
     return [];
 }
 
-async function sendTelegramMessage(chatId, text) {
+async function sendTelegramMessage(peer, text) {
     const session = await loadTelegramSession();
     if (!session) return false;
     
-    const tgChatId = parseInt(chatId.replace('tg_', ''));
-    
     try {
-        const response = await fetch('https://cap.uran-chat.space:8080/send-message', {
+        const response = await fetch('/tg-api-proxy.php?action=send-message', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
                 session_data: session,
-                chat_id: tgChatId,
-                text: text
+                peer: peer,
+                message: text
             })
         });
         
         const result = await response.json();
         
         if (result.success) {
-            const newMessage = {
-                id: result.message_id || Date.now(),
+            const message = {
+                id: Date.now(),
                 text: text,
                 time: new Date().toISOString(),
                 sender: currentUser.username,
-                receiver: chatId,
+                receiver: `tg_${peer}`,
                 isRead: true,
                 isDelivered: true
             };
-            await saveMessage(chatId, newMessage);
-            displayMessage(newMessage);
+            await saveMessage(`tg_${peer}`, message);
+            displayMessage(message);
             return true;
         }
     } catch (error) {
@@ -1445,10 +1461,28 @@ function openTelegramConnectWindow() {
             if (event.data.session) {
                 await saveTelegramSession(event.data.session);
             }
-            await getTelegramChats();
-            showStatus('Telegram аккаунт успешно подключен!', 'success');
+            await getTelegramDialogs();
+            showTelegramStatus('Telegram аккаунт успешно подключен!', 'success');
         }
     });
+}
+
+function showTelegramStatus(message, type) {
+    let statusDiv = document.getElementById('telegram-status');
+    if (!statusDiv) {
+        statusDiv = document.createElement('div');
+        statusDiv.id = 'telegram-status';
+        statusDiv.style.cssText = 'position: fixed; bottom: 20px; right: 20px; padding: 10px 20px; border-radius: 10px; z-index: 1000; background: white; box-shadow: 0 2px 10px rgba(0,0,0,0.1);';
+        document.body.appendChild(statusDiv);
+    }
+    statusDiv.textContent = message;
+    statusDiv.style.background = type === 'error' ? '#f8d7da' : (type === 'success' ? '#d4edda' : '#d1ecf1');
+    statusDiv.style.color = type === 'error' ? '#721c24' : (type === 'success' ? '#155724' : '#0c5460');
+    statusDiv.style.display = 'block';
+    
+    setTimeout(() => {
+        if (statusDiv) statusDiv.style.display = 'none';
+    }, 3000);
 }
 
 function addTelegramConnectButton() {
@@ -1491,24 +1525,6 @@ function addTelegramConnectButton() {
     sidebarHeader.appendChild(tgConnectBtn);
 }
 
-function showStatus(message, type) {
-    let statusDiv = document.getElementById('telegram-status');
-    if (!statusDiv) {
-        statusDiv = document.createElement('div');
-        statusDiv.id = 'telegram-status';
-        statusDiv.style.cssText = 'position: fixed; bottom: 20px; right: 20px; padding: 10px 20px; border-radius: 10px; z-index: 1000; background: white; box-shadow: 0 2px 10px rgba(0,0,0,0.1);';
-        document.body.appendChild(statusDiv);
-    }
-    statusDiv.textContent = message;
-    statusDiv.style.background = type === 'error' ? '#f8d7da' : (type === 'success' ? '#d4edda' : '#d1ecf1');
-    statusDiv.style.color = type === 'error' ? '#721c24' : (type === 'success' ? '#155724' : '#0c5460');
-    statusDiv.style.display = 'block';
-    
-    setTimeout(() => {
-        if (statusDiv) statusDiv.style.display = 'none';
-    }, 3000);
-}
-
 async function init() {
     await loadCurrentUser();
     await loadChats();
@@ -1522,7 +1538,7 @@ async function init() {
     
     const tgSession = await loadTelegramSession();
     if (tgSession) {
-        await getTelegramChats();
+        await getTelegramDialogs();
     }
 }
 
