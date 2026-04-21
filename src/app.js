@@ -7,6 +7,9 @@ let encryptionKey = null;
 let offlineCheckInterval = null;
 let pendingContextMenu = null;
 
+const TELEGRAM_API_URL = 'https://www.uran-chat.space/telegram-api/telegram.php';
+const TELEGRAM_LOGIN_URL = 'https://www.uran-chat.space/telegram-api/login.php';
+
 const peerConfig = {
     config: {
         iceServers: [
@@ -428,174 +431,144 @@ async function saveUserInfo(peerId, data) {
     }
 }
 
-// ==================== Функции для Telegram ====================
+// ==================== Функции для Telegram (новый API) ====================
 
-async function getTelegramMessages(peer, limit = 100) {
+async function callTelegramAPI(method, params = {}) {
     const session = await loadTelegramSession();
-    if (!session) return [];
+    if (!session && method !== 'health') {
+        console.error('Нет сессии Telegram');
+        return null;
+    }
+
+    const url = new URL(TELEGRAM_API_URL);
+    url.searchParams.append('method', method);
+    
+    if (session) {
+        url.searchParams.append('session', session);
+    }
+    
+    for (const [key, value] of Object.entries(params)) {
+        url.searchParams.append(key, value);
+    }
 
     try {
-        const response = await fetch('/tg-api-proxy.php?action=get-messages', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                session_data: session,
-                peer: peer,
-                limit: limit
-            })
-        });
-
+        const response = await fetch(url.toString());
         const result = await response.json();
-        console.log('Telegram messages response:', result);
-
-        if (result.success && result.data && Array.isArray(result.data)) {
-            const formattedMessages = [];
-            for (const msg of result.data) {
-                let senderId;
-                let receiverId;
-                
-                if (msg.out === true) {
-                    senderId = currentUser.username;
-                    receiverId = `tg_${peer}`;
-                } else {
-                    senderId = `tg_${peer}`;
-                    receiverId = currentUser.username;
-                }
-
-                let messageText = msg.text || '[Медиа]';
-                if (msg.photo) {
-                    messageText = '📷 Фото';
-                } else if (msg.video) {
-                    messageText = '🎥 Видео';
-                } else if (msg.sticker) {
-                    messageText = '🎨 Стикер';
-                } else if (msg.voice) {
-                    messageText = '🎤 Голосовое';
-                } else if (msg.document) {
-                    messageText = '📎 Документ';
-                }
-
-                formattedMessages.push({
-                    id: msg.id,
-                    text: messageText,
-                    time: new Date(msg.date * 1000).toISOString(),
-                    sender: senderId,
-                    receiver: receiverId,
-                    isRead: true,
-                    isDelivered: true,
-                    out: msg.out
-                });
-            }
-            formattedMessages.sort((a, b) => new Date(a.time) - new Date(b.time));
-            return formattedMessages;
-        } else {
-            console.error('Invalid response format:', result);
-            return [];
-        }
+        console.log(`Telegram API ${method} response:`, result);
+        return result;
     } catch (error) {
-        console.error('Ошибка получения сообщений Telegram:', error);
-        return [];
+        console.error(`Ошибка вызова Telegram API (${method}):`, error);
+        return null;
     }
+}
+
+async function getTelegramMessages(peer, limit = 100) {
+    const result = await callTelegramAPI('get_messages', {
+        peer: peer,
+        limit: limit
+    });
+    
+    if (result && result.success && result.data && Array.isArray(result.data)) {
+        const formattedMessages = [];
+        for (const msg of result.data) {
+            let senderId;
+            let receiverId;
+            
+            if (msg.out === true) {
+                senderId = currentUser.username;
+                receiverId = `tg_${peer}`;
+            } else {
+                senderId = `tg_${peer}`;
+                receiverId = currentUser.username;
+            }
+
+            let messageText = msg.text || '[Медиа]';
+            if (msg.photo) {
+                messageText = '📷 Фото';
+            } else if (msg.video) {
+                messageText = '🎥 Видео';
+            } else if (msg.sticker) {
+                messageText = '🎨 Стикер';
+            } else if (msg.voice) {
+                messageText = '🎤 Голосовое';
+            } else if (msg.document) {
+                messageText = '📎 Документ';
+            }
+
+            formattedMessages.push({
+                id: msg.id,
+                text: messageText,
+                time: new Date(msg.date * 1000).toISOString(),
+                sender: senderId,
+                receiver: receiverId,
+                isRead: true,
+                isDelivered: true,
+                out: msg.out
+            });
+        }
+        formattedMessages.sort((a, b) => new Date(a.time) - new Date(b.time));
+        return formattedMessages;
+    }
+    return [];
 }
 
 async function getTelegramDialogs() {
-    const session = await loadTelegramSession();
-    if (!session) return [];
-
-    try {
-        const response = await fetch('/tg-api-proxy.php?action=get-dialogs', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({ 
-                session_data: session,
-                limit: 100
-            })
-        });
-
-        const result = await response.json();
-        console.log('Telegram dialogs response:', result);
-
-        if (result.success && result.data && Array.isArray(result.data)) {
-            for (const dialog of result.data) {
-                const chatName = dialog.name;
-                const chatId = `tg_${chatName}`;
-                
-                if (!chats.has(chatId)) {
-                    chats.set(chatId, {
-                        messages: [],
-                        avatar: null,
-                        lastMessage: '',
-                        source: 'telegram',
-                        pinned: false,
-                        hidden: false,
-                        customName: null,
-                        tgData: {
-                            id: dialog.id,
-                            name: dialog.name,
-                            username: dialog.username || chatName,
-                            unread: dialog.unread || 0,
-                            photo: dialog.photo
-                        }
-                    });
-                    console.log(`Добавлен Telegram диалог: ${dialog.name} (unread: ${dialog.unread})`);
-                } else {
-                    const existingChat = chats.get(chatId);
-                    if (existingChat.tgData) {
-                        existingChat.tgData.unread = dialog.unread || 0;
+    const result = await callTelegramAPI('get_dialogs', { limit: 100 });
+    
+    if (result && result.success && result.data && Array.isArray(result.data)) {
+        for (const dialog of result.data) {
+            const chatName = dialog.name;
+            const chatId = `tg_${chatName}`;
+            
+            if (!chats.has(chatId)) {
+                chats.set(chatId, {
+                    messages: [],
+                    avatar: null,
+                    lastMessage: '',
+                    source: 'telegram',
+                    pinned: false,
+                    hidden: false,
+                    customName: null,
+                    tgData: {
+                        id: dialog.id,
+                        name: dialog.name,
+                        username: dialog.username || chatName,
+                        unread: dialog.unread || 0,
+                        photo: dialog.photo
                     }
+                });
+                console.log(`Добавлен Telegram диалог: ${dialog.name} (unread: ${dialog.unread})`);
+            } else {
+                const existingChat = chats.get(chatId);
+                if (existingChat.tgData) {
+                    existingChat.tgData.unread = dialog.unread || 0;
                 }
             }
-            await saveToLocalStorage();
-            await refreshChatsList();
-            return result.data;
-        } else {
-            console.error('Invalid dialogs response:', result);
-            return [];
         }
-    } catch (error) {
-        console.error('Ошибка получения диалогов Telegram:', error);
-        return [];
+        await saveToLocalStorage();
+        await refreshChatsList();
+        return result.data;
     }
+    return [];
 }
 
 async function sendTelegramMessage(peer, message) {
-    const session = await loadTelegramSession();
-    if (!session) {
-        console.error('Нет сессии Telegram');
-        return false;
-    }
+    const result = await callTelegramAPI('send_message', {
+        peer: peer,
+        message: message
+    });
+    
+    return result && result.success === true;
+}
 
-    try {
-        const response = await fetch('/tg-api-proxy.php?action=send-message', {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify({
-                session_data: session,
-                peer: peer,
-                message: message
-            })
-        });
+async function getTelegramUserInfo(username) {
+    const result = await callTelegramAPI('get_user_info', { username: username });
+    return result && result.success ? result.data : null;
+}
 
-        const result = await response.json();
-        console.log('Send message response:', result);
-        
-        if (result.success) {
-            console.log('Сообщение отправлено в Telegram');
-            return true;
-        } else {
-            console.error('Ошибка отправки:', result.error);
-            return false;
-        }
-    } catch (error) {
-        console.error('Ошибка при отправке в Telegram:', error);
-        return false;
-    }
+async function getTelegramMe() {
+    const result = await callTelegramAPI('get_me');
+    return result && result.success ? result.data : null;
 }
 
 // ==================== Основные функции ====================
@@ -1195,8 +1168,8 @@ function createChatItem(chatId, chatData, userInfo, displayName) {
         usernameSpan.textContent = `@${chatData.tgData.username}`;
         nameDiv.appendChild(usernameSpan);
         
-        const unreadBadge = document.createElement('span');
         if (chatData.tgData.unread > 0) {
+            const unreadBadge = document.createElement('span');
             unreadBadge.style.cssText = 'background: #e53935; color: white; border-radius: 10px; padding: 2px 6px; font-size: 10px; margin-left: 5px;';
             unreadBadge.textContent = chatData.tgData.unread;
             nameDiv.appendChild(unreadBadge);
@@ -1739,16 +1712,7 @@ function addTelegramConnectButton() {
         <span>Telegram</span>
     `;
 
-    tgConnectBtn.onclick = async () => {
-        const session = await loadTelegramSession();
-        if (session) {
-            if (confirm('У вас уже есть подключенный Telegram аккаунт. Хотите переподключиться?')) {
-                openTelegramConnectWindow();
-            }
-        } else {
-            openTelegramConnectWindow();
-        }
-    };
+    tgConnectBtn.onclick = openTelegramConnectWindow;
 
     sidebarHeader.appendChild(tgConnectBtn);
 }
