@@ -1,0 +1,194 @@
+name: Build Multi-Platform
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch: # Ручной запуск
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            platform: linux
+            arch: x64
+            artifact_suffix: linux-x64
+          
+          # Linux ARM64
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            platform: linux
+            arch: arm64
+            artifact_suffix: linux-arm64
+            setup_cross: true
+          
+          # Windows x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows
+            arch: x64
+            artifact_suffix: windows-x64
+          
+          # Windows ARM64
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            platform: windows
+            arch: arm64
+            artifact_suffix: windows-arm64
+          
+          # macOS x86_64
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            platform: macos
+            arch: x64
+            artifact_suffix: macos-x64
+          
+          # macOS ARM64 (Apple Silicon)
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            platform: macos
+            arch: arm64
+            artifact_suffix: macos-arm64
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      # Setup Rust
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+
+      # Install cross-compilation dependencies for Linux ARM64
+      - name: Install cross-compilation tools (Linux ARM64)
+        if: matrix.setup_cross == true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+
+      # Setup Node.js for Electron
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: client/package-lock.json
+
+      # Install Electron dependencies
+      - name: Install Electron dependencies
+        working-directory: ./client
+        run: npm ci
+
+      # Build setup project (Rust)
+      - name: Build setup project
+        working-directory: ./setup
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
+
+      # Build launcher project (Rust)
+      - name: Build launcher project
+        working-directory: ./launcher
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
+
+      # Build Electron app
+      - name: Build Electron app
+        working-directory: ./client
+        run: |
+          # Установка electron-builder глобально
+          npm install -g electron-builder
+          
+          # Сборка приложения
+          npm run make || npm run build
+          
+          # Поиск созданного бинарника и переименование в uran
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            # Для Windows
+            find . -name "*.exe" -type f -exec cp {} ./uran.exe \;
+          else
+            # Для Linux/macOS
+            find . -name "uran" -type f -exec cp {} ./uran \;
+            chmod +x ./uran
+          fi
+
+      # Подготовка артефактов
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          # Создаем директорию для артефактов
+          mkdir -p artifacts
+          
+          # Копируем бинарники Rust проектов
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cp ./setup/target/${{ matrix.target }}/release/setup.exe artifacts/setup-${{ matrix.artifact_suffix }}.exe
+            cp ./launcher/target/${{ matrix.target }}/release/launcher.exe artifacts/launcher-${{ matrix.artifact_suffix }}.exe
+          else
+            cp ./setup/target/${{ matrix.target }}/release/setup artifacts/setup-${{ matrix.artifact_suffix }}
+            cp ./launcher/target/${{ matrix.target }}/release/launcher artifacts/launcher-${{ matrix.artifact_suffix }}
+          fi
+          
+          # Копируем Electron бинарник
+          if [ "${{ matrix.platform }}" = "windows" ]; then
+            cp ./client/uran.exe artifacts/uran-${{ matrix.artifact_suffix }}.exe
+          else
+            cp ./client/uran artifacts/uran-${{ matrix.artifact_suffix }}
+          fi
+          
+          # Создаем README с информацией о сборке
+          cat > artifacts/README.txt << EOF
+          Build Information:
+          Platform: ${{ matrix.platform }}
+          Architecture: ${{ matrix.arch }}
+          Target: ${{ matrix.target }}
+          Build Date: $(date)
+          Artifacts:
+          - setup: Rust project from /setup
+          - launcher: Rust project from /launcher  
+          - uran: Electron application from /client
+          EOF
+
+      # Загрузка артефактов
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.artifact_suffix }}
+          path: artifacts/
+          retention-days: 30
+          compression-level: 6
+
+      # Дополнительно: загрузка всех артефактов одним архивом (опционально)
+  upload-all-artifacts:
+    needs: build
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: all-artifacts
+          
+      - name: Create combined archive
+        run: |
+          cd all-artifacts
+          zip -r ../all-builds-$(date +%Y%m%d-%H%M%S).zip .
+          cd ..
+          
+      - name: Upload combined archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: all-builds-combined
+          path: all-builds-*.zip
+          retention-days: 30
