@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>URAN Messenger</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <div id="logoContainer" class="container" style="display:none;">
+      <img id="logo" src="logo.webp" alt="URAN">
+      <h1 id="initialTitle">Первоначальная настройка</h1>
+      <div id="disclaimer" class="disclaimer">
+        Мы никуда не передаем ваши ключи/личные данные/переписку и тд.<br>
+        Мы являемся open-source мессенджером, который работает полностью на стороне клиента.<br>
+        Если вы сомневаетесь в безопасности данного мессенджера вы всегда можете увидеть весь его исходный код на 
+        <a href="https://github.com" target="_blank">GitHub</a>.<br>
+        Спасибо за внимание.
+      </div>
+      <button id="initialNextBtn" class="btn-primary">Далее</button>
+    </div>
+
+    <div id="instructionContainer" class="container" style="display:none;">
+      <div class="instruction-box">
+        <div class="instruction-text">
+          <strong>Чтобы начать пользоваться функциями Telegram вы должны перейти на сайт</strong><br>
+          <a id="telegramLink" href="https://my.telegram.org/apps" target="_blank">https://my.telegram.org/apps</a><br><br>
+          <strong>Войти там в свой аккаунт и скопировать app_id и app_hash.</strong><br>
+          Это необходимо для подключения и последующей работы с серверами Telegram.
+        </div>
+      </div>
+      
+      <input type="text" id="appIdInput" class="input-field" placeholder="app_id">
+      <input type="text" id="appHashInput" class="input-field" placeholder="app_hash">
+      <div id="configError" class="error-message"></div>
+      <button id="configNextBtn" class="btn-primary">Далее</button>
+    </div>
+
+    <div id="phoneContainer" class="container" style="display:none;">
+      <h3>Введите номер телефона</h3>
+      <input type="tel" id="phoneInput" class="input-field" placeholder="+79991234567">
+      <div id="phoneError" class="error-message"></div>
+      <button id="phoneNextBtn" class="btn-primary">Далее</button>
+    </div>
+
+    <div id="codeContainer" class="container" style="display:none;">
+      <div id="codeImage" class="code-image">
+        <picture>
+          <source srcset="https://fonts.gstatic.com/s/e/notoemoji/latest/1f4e6/512.webp" type="image/webp">
+          <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f4e6/512.gif" alt="📦" width="32" height="32">
+        </picture>
+      </div>
+      <div id="codeSentText" style="margin: 15px 0; font-weight: 500;">Код подтверждения для входа в аккаунт отправлен</div>
+      <div id="codeDisclaimer" class="disclaimer" style="background:#fff5f5; padding:10px; font-size:11px;">
+        Мессенджер не может украсть ваш аккаунт в Telegram по причине того, что вход происходит через ваше приложение (которое вы сделали в прошлом этапе), а мы всего лишь показываем это в интерфейсе 
+        (<a href="https://github.com" target="_blank">подробнее читать в Wiki на GitHub</a>)
+      </div>
+      <input type="text" id="codeInput" class="input-field" placeholder="Введите код">
+      <div id="codeError" class="error-message"></div>
+      <button id="codeNextBtn" class="btn-primary">Далее</button>
+    </div>
+
+    <div id="successContainer" class="container" style="display:none;">
+      <div id="successImage">
+        <picture>
+          <source srcset="https://fonts.gstatic.com/s/e/notoemoji/latest/1f389/512.webp" type="image/webp">
+          <img src="https://fonts.gstatic.com/s/e/notoemoji/latest/1f389/512.gif" alt="🎉" width="32" height="32">
+        </picture>
+      </div>
+      <div id="successText" class="success-text">Поздравляем! Вы успешно вошли в аккаунт!</div>
+      <button id="successNextBtn" class="btn-primary">Далее</button>
+    </div>
+
+    <div id="messengerContainer" class="messenger-container" style="display:none;">
+      <div class="chat-list">
+        <div class="chat-list-header">
+          <h3>Чаты</h3>
+        </div>
+        <div id="chatsList" class="chats-list"></div>
+      </div>
+      
+      <div class="chat-area">
+        <div class="chat-header">
+          <div class="chat-info">
+            <img id="chatAvatar" class="chat-avatar" src="" alt="">
+            <span id="chatName" class="chat-name">Выберите чат</span>
+          </div>
+        </div>
+        
+        <div id="messagesArea" class="messages-area"></div>
+        
+        <div class="input-area">
+          <textarea id="messageInput" class="message-input" placeholder="Введите сообщение..." rows="1"></textarea>
+          <button id="sendButton" class="send-button">
+            <img src="send.svg" alt="Отправить" width="24" height="24">
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
