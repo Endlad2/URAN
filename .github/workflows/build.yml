@@ -5,7 +5,7 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
-  workflow_dispatch: # Ручной запуск
+  workflow_dispatch:
 
 jobs:
   build:
@@ -50,7 +50,7 @@ jobs:
             arch: x64
             artifact_suffix: macos-x64
           
-          # macOS ARM64 (Apple Silicon)
+          # macOS ARM64
           - os: macos-latest
             target: aarch64-apple-darwin
             platform: macos
@@ -77,23 +77,28 @@ jobs:
           sudo apt-get install -y gcc-aarch64-linux-gnu
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
 
-      # Setup Node.js for Electron
+      # Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: client/package-lock.json
 
       # Install Electron dependencies
       - name: Install Electron dependencies
         working-directory: ./client
-        run: npm ci
+        run: |
+          if [ -f "package-lock.json" ]; then
+            npm ci
+          else
+            npm install
+          fi
+        shell: bash
 
       # Build setup project (Rust)
       - name: Build setup project
         working-directory: ./setup
         run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
 
@@ -101,30 +106,52 @@ jobs:
       - name: Build launcher project
         working-directory: ./launcher
         run: cargo build --release --target ${{ matrix.target }}
+        shell: bash
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
 
       # Build Electron app
       - name: Build Electron app
         working-directory: ./client
+        shell: bash
         run: |
-          # Установка electron-builder глобально
+          # Установка electron-builder
           npm install -g electron-builder
           
           # Сборка приложения
-          npm run make || npm run build
+          npm run build
           
-          # Поиск созданного бинарника и переименование в uran
-          if [ "${{ matrix.platform }}" = "windows" ]; then
-            # Для Windows
-            find . -name "*.exe" -type f -exec cp {} ./uran.exe \;
+          # Поиск и копирование бинарника
+          echo "Looking for built executable..."
+          
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            # Windows
+            exe_file=$(find . -name "*.exe" -type f | grep -i uran | head -n 1)
+            if [[ -n "$exe_file" ]]; then
+              cp "$exe_file" ./uran.exe
+              echo "✅ Copied to uran.exe from $exe_file"
+            else
+              echo "⚠️ No executable found, listing directory structure:"
+              find . -name "*.exe" -type f
+            fi
           else
-            # Для Linux/macOS
-            find . -name "uran" -type f -exec cp {} ./uran \;
-            chmod +x ./uran
+            # Linux/macOS
+            binary_file=$(find . -name "uran" -type f -executable | head -n 1)
+            if [[ -n "$binary_file" ]]; then
+              cp "$binary_file" ./uran
+              chmod +x ./uran
+              echo "✅ Copied to uran from $binary_file"
+            else
+              echo "⚠️ No binary found, listing directory structure:"
+              find . -type f -executable
+            fi
           fi
+          
+          # Для отладки - показать структуру
+          echo "Directory structure after build:"
+          ls -la
 
-      # Подготовка артефактов
+      # Prepare artifacts
       - name: Prepare artifacts
         shell: bash
         run: |
@@ -132,19 +159,45 @@ jobs:
           mkdir -p artifacts
           
           # Копируем бинарники Rust проектов
-          if [ "${{ matrix.platform }}" = "windows" ]; then
-            cp ./setup/target/${{ matrix.target }}/release/setup.exe artifacts/setup-${{ matrix.artifact_suffix }}.exe
-            cp ./launcher/target/${{ matrix.target }}/release/launcher.exe artifacts/launcher-${{ matrix.artifact_suffix }}.exe
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            if [ -f "./setup/target/${{ matrix.target }}/release/setup.exe" ]; then
+              cp ./setup/target/${{ matrix.target }}/release/setup.exe artifacts/setup-${{ matrix.artifact_suffix }}.exe
+            else
+              echo "Warning: setup.exe not found"
+            fi
+            
+            if [ -f "./launcher/target/${{ matrix.target }}/release/launcher.exe" ]; then
+              cp ./launcher/target/${{ matrix.target }}/release/launcher.exe artifacts/launcher-${{ matrix.artifact_suffix }}.exe
+            else
+              echo "Warning: launcher.exe not found"
+            fi
+            
+            # Копируем Electron бинарник
+            if [ -f "./client/uran.exe" ]; then
+              cp ./client/uran.exe artifacts/uran-${{ matrix.artifact_suffix }}.exe
+            else
+              echo "Warning: uran.exe not found"
+            fi
           else
-            cp ./setup/target/${{ matrix.target }}/release/setup artifacts/setup-${{ matrix.artifact_suffix }}
-            cp ./launcher/target/${{ matrix.target }}/release/launcher artifacts/launcher-${{ matrix.artifact_suffix }}
-          fi
-          
-          # Копируем Electron бинарник
-          if [ "${{ matrix.platform }}" = "windows" ]; then
-            cp ./client/uran.exe artifacts/uran-${{ matrix.artifact_suffix }}.exe
-          else
-            cp ./client/uran artifacts/uran-${{ matrix.artifact_suffix }}
+            if [ -f "./setup/target/${{ matrix.target }}/release/setup" ]; then
+              cp ./setup/target/${{ matrix.target }}/release/setup artifacts/setup-${{ matrix.artifact_suffix }}
+            else
+              echo "Warning: setup binary not found"
+            fi
+            
+            if [ -f "./launcher/target/${{ matrix.target }}/release/launcher" ]; then
+              cp ./launcher/target/${{ matrix.target }}/release/launcher artifacts/launcher-${{ matrix.artifact_suffix }}
+            else
+              echo "Warning: launcher binary not found"
+            fi
+            
+            # Копируем Electron бинарник
+            if [ -f "./client/uran" ]; then
+              cp ./client/uran artifacts/uran-${{ matrix.artifact_suffix }}
+              chmod +x artifacts/uran-${{ matrix.artifact_suffix }}
+            else
+              echo "Warning: uran binary not found"
+            fi
           fi
           
           # Создаем README с информацией о сборке
@@ -153,27 +206,37 @@ jobs:
           Platform: ${{ matrix.platform }}
           Architecture: ${{ matrix.arch }}
           Target: ${{ matrix.target }}
-          Build Date: $(date)
-          Artifacts:
+          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          Runner OS: ${{ runner.os }}
+          
+          Artifacts included:
           - setup: Rust project from /setup
           - launcher: Rust project from /launcher  
           - uran: Electron application from /client
+          
+          Usage:
+          - Windows: Run the .exe files directly
+          - Linux/macOS: Make sure to chmod +x before running
           EOF
+          
+          echo "Contents of artifacts directory:"
+          ls -la artifacts/
 
-      # Загрузка артефактов
+      # Upload artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.artifact_suffix }}
           path: artifacts/
           retention-days: 30
+          if-no-files-found: warn
           compression-level: 6
 
-      # Дополнительно: загрузка всех артефактов одним архивом (опционально)
+  # Optional: Upload all artifacts combined
   upload-all-artifacts:
     needs: build
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && github.event_name != 'pull_request'
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -185,6 +248,7 @@ jobs:
           cd all-artifacts
           zip -r ../all-builds-$(date +%Y%m%d-%H%M%S).zip .
           cd ..
+          echo "Combined archive created"
           
       - name: Upload combined archive
         uses: actions/upload-artifact@v4
@@ -192,3 +256,4 @@ jobs:
           name: all-builds-combined
           path: all-builds-*.zip
           retention-days: 30
+          if-no-files-found: warn
