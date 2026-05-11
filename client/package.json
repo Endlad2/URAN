@@ -1,6 +1,8 @@
 {
   "name": "uran",
   "version": "1.0.0",
+  "description": "URAN Application",
+  "author": "Your Name",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
@@ -15,37 +17,19 @@
     "rimraf": "^5.0.5"
   },
   "build": {
-    "appId": "com.yourcompany.uran",
+    "appId": "com.uran.app",
     "productName": "uran",
     "directories": {
-      "output": "dist",
-      "buildResources": "."
+      "output": "dist"
     },
     "files": [
       "**/*",
       "!**/node_modules/.cache",
       "!**/.git",
       "!**/.github",
-      "!**/.vscode",
       "!**/dist"
     ],
-    "asar": true,
-    "asarUnpack": [
-      "*.node",
-      "preload.js"
-    ],
-    "extraResources": [
-      {
-        "from": "./",
-        "to": ".",
-        "filter": [
-          "**/*",
-          "!**/node_modules/**",
-          "!**/.git/**",
-          "!**/dist/**"
-        ]
-      }
-    ],
+    "asar": false,
     "win": {
       "target": "dir",
       "executableName": "uran.exe"
