@@ -3,9 +3,60 @@
   "version": "1.0.0",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "build": "electron-builder --dir",
+    "dist": "electron-builder",
+    "make": "electron-builder --dir",
+    "clean": "rimraf dist"
   },
   "devDependencies": {
-    "electron": "^28.0.0"
+    "electron": "^28.0.0",
+    "electron-builder": "^24.9.1",
+    "rimraf": "^5.0.5"
+  },
+  "build": {
+    "appId": "com.yourcompany.uran",
+    "productName": "uran",
+    "directories": {
+      "output": "dist",
+      "buildResources": "."
+    },
+    "files": [
+      "**/*",
+      "!**/node_modules/.cache",
+      "!**/.git",
+      "!**/.github",
+      "!**/.vscode",
+      "!**/dist"
+    ],
+    "asar": true,
+    "asarUnpack": [
+      "*.node",
+      "preload.js"
+    ],
+    "extraResources": [
+      {
+        "from": "./",
+        "to": ".",
+        "filter": [
+          "**/*",
+          "!**/node_modules/**",
+          "!**/.git/**",
+          "!**/dist/**"
+        ]
+      }
+    ],
+    "win": {
+      "target": "dir",
+      "executableName": "uran"
+    },
+    "linux": {
+      "target": "dir",
+      "executableName": "uran"
+    },
+    "mac": {
+      "target": "dir",
+      "executableName": "uran"
+    }
   }
 }

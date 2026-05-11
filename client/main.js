@@ -6,33 +6,65 @@ const { Worker } = require('worker_threads');
 app.commandLine.appendSwitch('disable-features', 'WindowsTransparency');
 app.commandLine.appendSwitch('disable-gpu', false);
 
-const photosDir = path.join(__dirname, 'photos');
-if (!fs.existsSync(photosDir)) {
-  fs.mkdirSync(photosDir, { recursive: true });
+// Используем userData для записи файлов (не ASAR)
+const userDataPath = app.getPath('userData');
+const photosDir = path.join(userDataPath, 'photos');
+
+// Функция для безопасного создания директории
+function ensureDirectoryExists(dirPath) {
+  try {
+    if (fs.existsSync(dirPath)) {
+      const stat = fs.statSync(dirPath);
+      if (!stat.isDirectory()) {
+        fs.unlinkSync(dirPath);
+        console.log(`Removed file at ${dirPath}`);
+      }
+    }
+    if (!fs.existsSync(dirPath)) {
+      fs.mkdirSync(dirPath, { recursive: true });
+      console.log(`Created directory at ${dirPath}`);
+    }
+    return true;
+  } catch (error) {
+    console.error(`Error creating directory ${dirPath}:`, error);
+    return false;
+  }
 }
+
+// Создаем директорию для фото в userData
+ensureDirectoryExists(photosDir);
 
 let avatarWorker = null;
 
 function getAvatarWorker() {
   if (avatarWorker) return avatarWorker;
   
-  const workerPath = path.join(__dirname, 'avatar-worker.js');
+  // Для worker используем временную директорию, не ASAR
+  const tempDir = path.join(app.getPath('temp'), 'uran-workers');
+  ensureDirectoryExists(tempDir);
+  const workerPath = path.join(tempDir, 'avatar-worker.js');
+  
   if (!fs.existsSync(workerPath)) {
     const workerCode = `
       const { parentPort } = require('worker_threads');
       const https = require('https');
       const http = require('http');
       const fs = require('fs');
+      const path = require('path');
+      
+      // Получаем путь к photos из переменной окружения
+      const photosDir = process.env.URAN_PHOTOS_DIR;
       
       function downloadFile(url, filepath) {
         return new Promise((resolve, reject) => {
           const urlObj = new URL(url);
           const options = {
-            hostname: 'localhost',
-            port: urlObj.port || 9870,
+            hostname: urlObj.hostname,
+            port: urlObj.port || (url.startsWith('https') ? 443 : 80),
             path: urlObj.pathname + urlObj.search,
             method: 'GET',
-            family: 4
+            family: 4,
+            rejectUnauthorized: false
           };
           
           const client = url.startsWith('https') ? https : http;
@@ -44,11 +76,23 @@ function getAvatarWorker() {
                 file.close();
                 resolve(true);
               });
+            } else if (response.statusCode === 301 || response.statusCode === 302) {
+              // Обработка редиректа
+              const redirectUrl = response.headers.location;
+              if (redirectUrl) {
+                downloadFile(redirectUrl, filepath).then(resolve).catch(reject);
+              } else {
+                reject(new Error('Redirect without location'));
+              }
             } else {
-              reject(new Error('Failed to download'));
+              reject(new Error(\`Failed to download: HTTP \${response.statusCode}\`));
             }
           });
           req.on('error', reject);
+          req.setTimeout(30000, () => {
+            req.destroy();
+            reject(new Error('Request timeout'));
+          });
           req.end();
         });
       }
@@ -59,7 +103,7 @@ function getAvatarWorker() {
         try {
           if (type === 'avatar') {
             const filename = \`\${chatId}.jpg\`;
-            const filepath = \`\${__dirname}/photos/\${filename}\`;
+            const filepath = path.join(photosDir, filename);
             await downloadFile(imageUrl, filepath);
             parentPort.postMessage({ success: true, type: 'avatar', chatId, localPath: \`file://\${filepath}\` });
           } else if (type === 'media') {
@@ -67,14 +111,14 @@ function getAvatarWorker() {
             if (mediaType === 'sticker') ext = '.webp';
             if (mediaType === 'video') ext = '.mp4';
             const filename = \`\${assetId}\${ext}\`;
-            const filepath = \`\${__dirname}/photos/\${filename}\`;
+            const filepath = path.join(photosDir, filename);
             await downloadFile(imageUrl, filepath);
             parentPort.postMessage({ success: true, type: 'media', assetId, localPath: \`file://\${filepath}\` });
           } else if (type === 'check') {
             const possiblePaths = [
-              \`\${__dirname}/photos/\${identifier}.jpg\`,
-              \`\${__dirname}/photos/\${identifier}.webp\`,
-              \`\${__dirname}/photos/\${identifier}.mp4\`
+              path.join(photosDir, \`\${identifier}.jpg\`),
+              path.join(photosDir, \`\${identifier}.webp\`),
+              path.join(photosDir, \`\${identifier}.mp4\`)
             ];
             let found = null;
             for (const filepath of possiblePaths) {
@@ -93,7 +137,12 @@ function getAvatarWorker() {
     fs.writeFileSync(workerPath, workerCode);
   }
   
-  avatarWorker = new Worker(workerPath);
+  avatarWorker = new Worker(workerPath, {
+    env: {
+      ...process.env,
+      URAN_PHOTOS_DIR: photosDir
+    }
+  });
   return avatarWorker;
 }
 
