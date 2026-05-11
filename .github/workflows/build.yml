@@ -83,196 +83,37 @@ jobs:
         with:
           node-version: '20'
 
-      # Install Electron dependencies
-      - name: Install Electron dependencies
-        working-directory: ./client
-        run: |
-          if [ -f "package-lock.json" ]; then
-            npm ci
-          else
-            npm install
-          fi
-        shell: bash
+      # Setup Python (для запуска build.py)
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-      # Build setup project (Rust)
-      - name: Build setup project
-        working-directory: ./setup
-        run: cargo build --release --target ${{ matrix.target }}
+      # Install Python dependencies if needed
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          # Раскомментируйте если нужны дополнительные пакеты
+          # pip install -r requirements.txt
+
+      # Run build.py
+      - name: Run build.py
+        run: python build.py
         shell: bash
         env:
+          TARGET: ${{ matrix.target }}
+          PLATFORM: ${{ matrix.platform }}
+          ARCH: ${{ matrix.arch }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
 
-      # Debug: Show setup build output
-      - name: Debug setup build output
-        run: |
-          echo "Setup build output:"
-          ls -la ./setup/target/${{ matrix.target }}/release/ || echo "Directory not found"
-          echo "Finding any executables in setup:"
-          find ./setup -name "setup*" -type f 2>/dev/null || echo "No setup files found"
-        shell: bash
-
-      # Build launcher project (Rust)
-      - name: Build launcher project
-        working-directory: ./launcher
-        run: cargo build --release --target ${{ matrix.target }}
-        shell: bash
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
-
-      # Debug: Show launcher build output
-      - name: Debug launcher build output
-        run: |
-          echo "Launcher build output:"
-          ls -la ./launcher/target/${{ matrix.target }}/release/ || echo "Directory not found"
-          echo "Finding any executables in launcher:"
-          find ./launcher -name "launcher*" -type f 2>/dev/null || echo "No launcher files found"
-        shell: bash
-
-      # Build Electron app
-      - name: Build Electron app
-        working-directory: ./client
-        shell: bash
-        run: |
-          # Установка electron-builder
-          npm install -g electron-builder
-          
-          # Сборка приложения
-          npm run build
-          
-          # Поиск и копирование бинарника
-          echo "Looking for built executable..."
-          
-          if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            # Windows
-            exe_file=$(find ./dist -name "*.exe" -type f 2>/dev/null | head -n 1)
-            if [[ -n "$exe_file" ]]; then
-              cp "$exe_file" ./uran.exe
-              echo "✅ Copied to uran.exe from $exe_file"
-            else
-              echo "⚠️ No executable found, listing directory structure:"
-              ls -la ./dist/ || echo "No dist directory"
-            fi
-          else
-            # Linux/macOS
-            binary_file=$(find ./dist -name "uran" -type f 2>/dev/null | head -n 1)
-            if [[ -n "$binary_file" ]]; then
-              cp "$binary_file" ./uran
-              chmod +x ./uran
-              echo "✅ Copied to uran from $binary_file"
-            else
-              echo "⚠️ No binary found, listing directory structure:"
-              ls -la ./dist/ || echo "No dist directory"
-            fi
-          fi
-          
-          # Для отладки - показать структуру
-          echo "Current directory contents:"
-          ls -la
-
-      # Prepare artifacts - FIXED VERSION
-      - name: Prepare artifacts
-        shell: bash
-        run: |
-          # Создаем директорию для артефактов
-          mkdir -p artifacts
-          
-          # Копируем бинарники Rust проектов с правильными путями
-          echo "=== Copying Rust binaries ==="
-          
-          # Путь до бинарников
-          SETUP_PATH="./setup/target/${{ matrix.target }}/release"
-          LAUNCHER_PATH="./launcher/target/${{ matrix.target }}/release"
-          
-          # Проверяем и копируем setup
-          if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            if [ -f "${SETUP_PATH}/setup.exe" ]; then
-              cp "${SETUP_PATH}/setup.exe" "artifacts/setup-${{ matrix.artifact_suffix }}.exe"
-              echo "✅ Copied setup.exe"
-            else
-              echo "❌ setup.exe not found at ${SETUP_PATH}/setup.exe"
-              ls -la ${SETUP_PATH} || echo "Directory not found"
-            fi
-            
-            if [ -f "${LAUNCHER_PATH}/launcher.exe" ]; then
-              cp "${LAUNCHER_PATH}/launcher.exe" "artifacts/launcher-${{ matrix.artifact_suffix }}.exe"
-              echo "✅ Copied launcher.exe"
-            else
-              echo "❌ launcher.exe not found at ${LAUNCHER_PATH}/launcher.exe"
-              ls -la ${LAUNCHER_PATH} || echo "Directory not found"
-            fi
-          else
-            # Linux/macOS
-            if [ -f "${SETUP_PATH}/setup" ]; then
-              cp "${SETUP_PATH}/setup" "artifacts/setup-${{ matrix.artifact_suffix }}"
-              chmod +x "artifacts/setup-${{ matrix.artifact_suffix }}"
-              echo "✅ Copied setup binary"
-            else
-              echo "❌ setup binary not found at ${SETUP_PATH}/setup"
-              ls -la ${SETUP_PATH} || echo "Directory not found"
-            fi
-            
-            if [ -f "${LAUNCHER_PATH}/launcher" ]; then
-              cp "${LAUNCHER_PATH}/launcher" "artifacts/launcher-${{ matrix.artifact_suffix }}"
-              chmod +x "artifacts/launcher-${{ matrix.artifact_suffix }}"
-              echo "✅ Copied launcher binary"
-            else
-              echo "❌ launcher binary not found at ${LAUNCHER_PATH}/launcher"
-              ls -la ${LAUNCHER_PATH} || echo "Directory not found"
-            fi
-          fi
-          
-          # Копируем Electron бинарник
-          echo "=== Copying Electron binary ==="
-          if [[ "${{ matrix.platform }}" == "windows" ]]; then
-            if [ -f "./client/uran.exe" ]; then
-              cp "./client/uran.exe" "artifacts/uran-${{ matrix.artifact_suffix }}.exe"
-              echo "✅ Copied uran.exe"
-            else
-              echo "❌ uran.exe not found"
-              find ./client -name "*.exe" -type f || echo "No exe files found"
-            fi
-          else
-            if [ -f "./client/uran" ]; then
-              cp "./client/uran" "artifacts/uran-${{ matrix.artifact_suffix }}"
-              chmod +x "artifacts/uran-${{ matrix.artifact_suffix }}"
-              echo "✅ Copied uran binary"
-            else
-              echo "❌ uran binary not found"
-              find ./client -name "uran" -type f || echo "No uran files found"
-            fi
-          fi
-          
-          # Создаем README
-          cat > artifacts/README.txt << EOF
-          Build Information:
-          Platform: ${{ matrix.platform }}
-          Architecture: ${{ matrix.arch }}
-          Target: ${{ matrix.target }}
-          Build Date: $(date -u +"%Y-%m-%d %H:%M:%S UTC")
-          Runner OS: ${{ runner.os }}
-          
-          Artifacts included:
-          - setup: Rust project from /setup
-          - launcher: Rust project from /launcher  
-          - uran: Electron application from /client
-          EOF
-          
-          echo ""
-          echo "=== Final artifacts directory contents ==="
-          ls -la artifacts/
-          
-          # Проверяем количество файлов
-          ARTIFACT_COUNT=$(ls -1 artifacts/ | wc -l)
-          echo "Total artifacts: $ARTIFACT_COUNT"
-
-      # Upload artifacts
+      # Upload build artifacts
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: build-${{ matrix.artifact_suffix }}
-          path: artifacts/
+          path: build/
           retention-days: 30
-          if-no-files-found: error  # Теперь будет ошибка если файлов нет
+          if-no-files-found: error
 
   # Upload all artifacts combined
   upload-all-artifacts:
