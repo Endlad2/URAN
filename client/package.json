@@ -48,7 +48,7 @@
     ],
     "win": {
       "target": "dir",
-      "executableName": "uran"
+      "executableName": "uran.exe"
     },
     "linux": {
       "target": "dir",
