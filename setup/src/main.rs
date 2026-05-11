@@ -1,432 +1,462 @@
-use std::fs::{self, File};
-use std::io::{Write, BufReader};
+use std::process::{Command, exit};
 use std::path::PathBuf;
-use std::process::Command;
 use std::env;
-use winapi::um::shellapi::ShellExecuteW;
-use std::ptr::null_mut;
-use std::sync::mpsc;
-use std::thread;
-use winapi::shared::minwindef::{TRUE, FALSE, LPARAM, WPARAM, UINT};
-use winapi::shared::windef::HWND;
-use winapi::um::winuser::{MB_OK, MessageBoxW};
+use std::fs;
+use std::io;
 
-fn main() {
-    if !is_admin() {
-        request_admin();
+#[cfg(target_os = "windows")]
+const URAN_EXE: &str = "uran.exe";
+
+#[cfg(target_os = "linux")]
+const URAN_EXE: &str = "uran";
+
+#[cfg(target_os = "macos")]
+const URAN_EXE: &str = "uran";
+
+// Вспомогательная функция для распаковки zip
+fn extract_zip(zip_path: &PathBuf, dest_path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    let file = fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(file)?;
+    
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i)?;
+        let outpath = dest_path.join(file.name());
+        
+        if file.name().ends_with('/') {
+            fs::create_dir_all(&outpath)?;
+        } else {
+            if let Some(parent) = outpath.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut outfile = fs::File::create(&outpath)?;
+            io::copy(&mut file, &mut outfile)?;
+        }
+        
+        // Устанавливаем права на выполнение для Unix систем
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(mode) = file.unix_mode() {
+                fs::set_permissions(&outpath, fs::Permissions::from_mode(mode))?;
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+// Упрощенная функция для создания ярлыка в меню пуск (Windows) через PowerShell
+#[cfg(target_os = "windows")]
+fn create_start_menu_shortcut(target_path: &PathBuf, shortcut_name: &str) {
+    let programs_menu = match env::var("APPDATA") {
+        Ok(path) => PathBuf::from(path).join(r"Microsoft\Windows\Start Menu\Programs"),
+        Err(_) => return,
+    };
+    
+    if !programs_menu.exists() {
         return;
     }
-
-    let (tx, rx) = mpsc::channel();
     
-    let installer_thread = thread::spawn(move || {
-        let steps = vec![
-            "Создание папок...",
-            "Определение архитектуры...",
-            "Загрузка Python...",
-            "Распаковка Python...",
-            "Загрузка pip...",
-            "Установка зависимостей...",
-            "Загрузка API...",
-            "Распаковка API...",
-            "Загрузка launcher.exe...",
-            "Создание ярлыков..."
-        ];
-        
-        for (i, step) in steps.iter().enumerate() {
-            tx.send((i, step.to_string())).unwrap();
-            match i {
-                0 => create_folders(),
-                1 => detect_arch(),
-                2 => download_python(),
-                3 => extract_python(),
-                4 => download_pip(),
-                5 => install_deps(),
-                6 => download_api(),
-                7 => extract_api(),
-                8 => download_launcher(),
-                9 => create_shortcuts(),
-                _ => {}
-            }
-            thread::sleep(std::time::Duration::from_millis(100));
-        }
-        tx.send((10, "Готово!".to_string())).unwrap();
-    });
-
-    show_gui(rx);
-    installer_thread.join().unwrap();
-}
-
-fn is_admin() -> bool {
-    use winapi::um::securitybaseapi::GetTokenInformation;
-    use winapi::um::winnt::{TOKEN_QUERY, TokenElevation, HANDLE};
-    use winapi::um::processthreadsapi::GetCurrentProcess;
-    use winapi::um::handleapi::CloseHandle;
+    let shortcut_path = programs_menu.join(format!("{}.lnk", shortcut_name));
+    let target_str = target_path.to_str().unwrap_or("");
     
-    let mut token: HANDLE = null_mut();
-    unsafe {
-        if winapi::um::processthreadsapi::OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return false;
-        }
-        let mut elevation: u32 = 0;
-        let mut size = std::mem::size_of::<u32>() as u32;
-        let result = GetTokenInformation(token, TokenElevation, &mut elevation as *mut _ as *mut _, size, &mut size);
-        CloseHandle(token);
-        result == TRUE && elevation != 0
+    // Исправление: создаем binding для PathBuf
+    let default_path = PathBuf::from(".");
+    let working_dir_path = target_path.parent().unwrap_or(&default_path);
+    let working_dir = working_dir_path.to_str().unwrap_or(".");
+    
+    // Используем PowerShell для создания ярлыка (более надежный способ)
+    let ps_script = format!(
+        "$WshShell = New-Object -comObject WScript.Shell\n\
+         $Shortcut = $WshShell.CreateShortcut(\"{}\")\n\
+         $Shortcut.TargetPath = \"{}\"\n\
+         $Shortcut.WorkingDirectory = \"{}\"\n\
+         $Shortcut.Save()",
+        shortcut_path.to_str().unwrap_or(""),
+        target_str,
+        working_dir
+    );
+    
+    let ps_script_path = programs_menu.join("temp_create_shortcut.ps1");
+    if fs::write(&ps_script_path, ps_script).is_ok() {
+        let _ = Command::new("powershell")
+            .args(&["-ExecutionPolicy", "Bypass", "-File", ps_script_path.to_str().unwrap_or("")])
+            .status();
+        let _ = fs::remove_file(ps_script_path);
     }
 }
 
-fn request_admin() {
-    let operation = "runas\0".encode_utf16().collect::<Vec<u16>>();
-    let file = std::env::current_exe().unwrap();
-    let file_str = file.to_str().unwrap();
-    let file_wide: Vec<u16> = file_str.encode_utf16().chain(Some(0)).collect();
+// Функция для создания ярлыка в меню приложений (Linux)
+#[cfg(target_os = "linux")]
+fn create_application_shortcut(target_path: &PathBuf, shortcut_name: &str) {
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let desktop_dir = PathBuf::from(&home).join(".local/share/applications");
     
-    unsafe {
-        ShellExecuteW(
-            null_mut(),
-            operation.as_ptr(),
-            file_wide.as_ptr(),
-            null_mut(),
-            null_mut(),
-            5,
+    if fs::create_dir_all(&desktop_dir).is_ok() {
+        let desktop_file = desktop_dir.join(format!("{}.desktop", shortcut_name.to_lowercase()));
+        let content = format!(
+            "[Desktop Entry]\n\
+            Version=1.0\n\
+            Type=Application\n\
+            Name={}\n\
+            Exec={}\n\
+            Path={}\n\
+            Terminal=false\n\
+            Categories=Utility;\n",
+            shortcut_name,
+            target_path.display(),
+            target_path.parent().unwrap_or(&PathBuf::from(".")).display()
         );
+        
+        let _ = fs::write(desktop_file, content);
     }
-    std::process::exit(0);
 }
 
-fn show_gui(rx: mpsc::Receiver<(usize, String)>) {
-    use winapi::um::winuser::{
-        CreateWindowExW, DispatchMessageW, GetMessageW, 
-        LoadCursorW, RegisterClassW, ShowWindow, TranslateMessage, 
-        MSG, WNDCLASSW, WS_OVERLAPPEDWINDOW, CW_USEDEFAULT, IDC_ARROW,
-        WM_CREATE, WM_DESTROY, WS_CHILD, WS_VISIBLE, SS_CENTER,
-        DestroyWindow, PostQuitMessage, SetWindowTextW, SendMessageW, DefWindowProcW
+// Функция для создания ярлыка в папке Applications (macOS)
+#[cfg(target_os = "macos")]
+fn create_application_shortcut(target_path: &PathBuf, shortcut_name: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    
+    let applications_dir = PathBuf::from("/Applications");
+    let app_bundle = applications_dir.join(format!("{}.app", shortcut_name));
+    
+    if fs::create_dir_all(&app_bundle.join("Contents/MacOS")).is_ok() {
+        let launcher_script = app_bundle.join("Contents/MacOS/launcher");
+        let script_content = format!(
+            "#!/bin/bash\n\
+            cd \"{}\"\n\
+            open \"{}\"\n",
+            target_path.parent().unwrap_or(&PathBuf::from(".")).display(),
+            target_path.display()
+        );
+        
+        let _ = fs::write(&launcher_script, script_content);
+        
+        // Делаем скрипт исполняемым
+        if let Ok(perms) = fs::metadata(&launcher_script) {
+            let mut new_perms = perms.permissions();
+            new_perms.set_mode(0o755);
+            let _ = fs::set_permissions(&launcher_script, new_perms);
+        }
+        
+        // Создаем Info.plist
+        let plist_path = app_bundle.join("Contents/Info.plist");
+        let plist_content = format!(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+            <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+            <plist version=\"1.0\">\n\
+            <dict>\n\
+                <key>CFBundleExecutable</key>\n\
+                <string>launcher</string>\n\
+                <key>CFBundleIdentifier</key>\n\
+                <string>com.uran.{}</string>\n\
+                <key>CFBundleName</key>\n\
+                <string>{}</string>\n\
+            </dict>\n\
+            </plist>",
+            shortcut_name.to_lowercase(),
+            shortcut_name
+        );
+        let _ = fs::write(plist_path, plist_content);
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn main() {
+    let appdata = match env::var("APPDATA") {
+        Ok(path) => PathBuf::from(path),
+        Err(_) => {
+            eprintln!("APPDATA environment variable not found");
+            exit(1);
+        }
     };
-    use winapi::shared::windef::POINT;
-    use std::ptr::null_mut;
     
-    let hinstance = unsafe { winapi::um::libloaderapi::GetModuleHandleW(null_mut()) };
+    let uran_dir = appdata.join(".URAN");
+    let python_path = uran_dir.join("python").join("pythonw.exe");
+    let script_path = uran_dir.join("api").join("tg.py");
+    let launcher_path = uran_dir.join("launcher.exe");
+    let uran_subdir = uran_dir.join("uran");
+    let _uran_path = uran_subdir.join(URAN_EXE);
     
-    let class_name = "URANInstaller\0".encode_utf16().collect::<Vec<u16>>();
+    // Создаем папки если их нет
+    fs::create_dir_all(&uran_subdir).unwrap_or_else(|e| {
+        eprintln!("Failed to create URAN directory: {}", e);
+        exit(1);
+    });
     
-    let wc = WNDCLASSW {
-        style: 0,
-        lpfnWndProc: Some(window_proc),
-        cbClsExtra: 0,
-        cbWndExtra: 0,
-        hInstance: hinstance,
-        hIcon: 0 as _,
-        hCursor: unsafe { LoadCursorW(0 as _, IDC_ARROW) },
-        hbrBackground: 0 as _,
-        lpszMenuName: null_mut(),
-        lpszClassName: class_name.as_ptr(),
-    };
+    // Ищем zip архив с приложением
+    let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     
-    unsafe { RegisterClassW(&wc); }
+    // Находим zip файл
+    let zip_file = fs::read_dir(&current_dir)
+        .ok()
+        .and_then(|entries| {
+            entries.filter_map(Result::ok)
+                .find(|entry| {
+                    // Исправление: создаем binding для файла
+                    let file_name = entry.file_name();
+                    let name = file_name.to_string_lossy();
+                    name.starts_with("uran-app-") && name.ends_with(".zip")
+                })
+                .map(|entry| entry.path())
+        });
     
-    let rx = Box::new(rx);
-    
-    let hwnd = unsafe {
-        CreateWindowExW(
-            0,
-            class_name.as_ptr(),
-            "URAN Installer\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-            WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT, CW_USEDEFAULT, 500, 300,
-            null_mut(),
-            null_mut(),
-            hinstance,
-            Box::into_raw(rx) as _,
-        )
-    };
-    
-    unsafe { ShowWindow(hwnd, 1); }
-    
-    let mut msg = MSG { 
-        hwnd: null_mut(), 
-        message: 0, 
-        wParam: 0, 
-        lParam: 0, 
-        time: 0, 
-        pt: POINT { x: 0, y: 0 } 
-    };
-    
-    unsafe {
-        while GetMessageW(&mut msg, null_mut(), 0, 0) > 0 {
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+    if let Some(zip_path) = zip_file {
+        println!("Extracting {} to {:?}", zip_path.display(), uran_dir);
+        if let Err(e) = extract_zip(&zip_path, &uran_dir) {
+            eprintln!("Failed to extract zip: {}", e);
+            exit(1);
         }
     }
-}
-
-extern "system" fn window_proc(hwnd: HWND, msg: UINT, wparam: WPARAM, lparam: LPARAM) -> isize {
-    use winapi::um::winuser::{
-        WM_CREATE, WM_DESTROY, CreateWindowExW, WS_CHILD, WS_VISIBLE, SS_CENTER,
-        DestroyWindow, PostQuitMessage, SendMessageW, SetWindowTextW, DefWindowProcW,
-        WM_TIMER, SetTimer
-    };
-    use std::ptr::null_mut;
-    use std::sync::mpsc::Receiver;
     
-    static mut LABEL_HWND: HWND = null_mut();
-    static mut PROGRESS_HWND: HWND = null_mut();
-    static mut RX_PTR: *mut Receiver<(usize, String)> = null_mut();
-    
-    if msg == WM_CREATE {
-        let createstruct = unsafe { &*(lparam as *const winapi::um::winuser::CREATESTRUCTW) };
-        let rx = createstruct.lpCreateParams as *mut Receiver<(usize, String)>;
+    // Запускаем Python скрипт только если он существует (для Windows)
+    if python_path.exists() && script_path.exists() {
+        let status = Command::new(&python_path)
+            .arg(&script_path)
+            .status()
+            .expect("Failed to execute Python script");
         
-        unsafe {
-            RX_PTR = rx;
+        if !status.success() {
+            eprintln!("Python script exited with error: {:?}", status.code());
+            exit(1);
+        }
+    }
+    
+    // Запускаем launcher
+    if !launcher_path.exists() {
+        eprintln!("launcher.exe not found at {:?}", launcher_path);
+        eprintln!("Trying to find launcher in current directory...");
+        
+        // Пробуем найти launcher в текущей директории
+        let current_launcher = current_dir.join("launcher.exe");
+        if current_launcher.exists() {
+            println!("Found launcher at {:?}", current_launcher);
+            let status = Command::new(&current_launcher)
+                .status()
+                .expect("Failed to execute launcher");
             
-            LABEL_HWND = CreateWindowExW(
-                0,
-                "STATIC\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-                "Подготовка к установке...\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-                WS_CHILD | WS_VISIBLE | SS_CENTER,
-                20, 100, 460, 30,
-                hwnd,
-                null_mut(),
-                createstruct.hInstance,
-                null_mut(),
-            );
-            
-            PROGRESS_HWND = CreateWindowExW(
-                0,
-                "msctls_progress32\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-                null_mut(),
-                WS_CHILD | WS_VISIBLE,
-                20, 150, 460, 30,
-                hwnd,
-                null_mut(),
-                createstruct.hInstance,
-                null_mut(),
-            );
-        }
-        
-        unsafe {
-            SetTimer(hwnd, 1, 100, None);
-        }
-        
-        return 0;
-    }
-    
-    if msg == WM_TIMER {
-        unsafe {
-            if !RX_PTR.is_null() {
-                let rx = &*RX_PTR;
-                if let Ok((step, text)) = rx.try_recv() {
-                    let text_wide: Vec<u16> = text.encode_utf16().chain(Some(0)).collect();
-                    SetWindowTextW(LABEL_HWND, text_wide.as_ptr());
-                    let pos = (step * 10) as i32;
-                    SendMessageW(PROGRESS_HWND, 0x0400 + 2, 0, pos as isize);
-                    
-                    if step == 10 {
-                        MessageBoxW(hwnd, 
-                            "Установка завершена!\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-                            "Успех\0".encode_utf16().collect::<Vec<u16>>().as_ptr(),
-                            MB_OK);
-                        DestroyWindow(hwnd);
-                    }
-                }
+            if !status.success() {
+                eprintln!("Launcher exited with error: {:?}", status.code());
+                exit(1);
             }
-        }
-        return 0;
-    }
-    
-    if msg == WM_DESTROY {
-        unsafe {
-            if !RX_PTR.is_null() {
-                drop(Box::from_raw(RX_PTR));
-            }
-            PostQuitMessage(0);
-        }
-        return 0;
-    }
-    
-    unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
-}
-
-fn create_folders() {
-    let appdata = env::var("APPDATA").unwrap();
-    let uran_dir = PathBuf::from(appdata).join(".URAN");
-    fs::create_dir_all(&uran_dir).unwrap();
-    fs::create_dir_all(uran_dir.join("python")).unwrap();
-    fs::create_dir_all(uran_dir.join("api")).unwrap();
-}
-
-fn detect_arch() {
-    let _arch = std::env::consts::ARCH;
-}
-
-fn download_python() {
-    let arch = if cfg!(target_arch = "x86_64") { "amd64" } else { "win32" };
-    let url = format!("https://www.python.org/ftp/python/3.10.0/python-3.10.0-embed-{}.zip", arch);
-    let client = reqwest::blocking::Client::new();
-    let response = client.get(&url).send().unwrap();
-    let appdata = env::var("APPDATA").unwrap();
-    let zip_path = PathBuf::from(&appdata).join(".URAN").join("python.zip");
-    let mut file = File::create(&zip_path).unwrap();
-    file.write_all(&response.bytes().unwrap()).unwrap();
-}
-
-fn extract_python() {
-    let appdata = env::var("APPDATA").unwrap();
-    let zip_path = PathBuf::from(&appdata).join(".URAN").join("python.zip");
-    let extract_to = PathBuf::from(&appdata).join(".URAN").join("python");
-    let file = File::open(&zip_path).unwrap();
-    let mut archive = zip::ZipArchive::new(BufReader::new(file)).unwrap();
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).unwrap();
-        let outpath = extract_to.join(file.name());
-        if file.is_dir() {
-            fs::create_dir_all(&outpath).unwrap();
         } else {
-            if let Some(p) = outpath.parent() {
-                if !p.exists() {
-                    fs::create_dir_all(p).unwrap();
-                }
-            }
-            let mut outfile = File::create(&outpath).unwrap();
-            std::io::copy(&mut file, &mut outfile).unwrap();
+            eprintln!("No launcher found!");
+            exit(1);
+        }
+    } else {
+        let status = Command::new(&launcher_path)
+            .status()
+            .expect("Failed to execute launcher");
+        
+        if !status.success() {
+            eprintln!("Launcher exited with error: {:?}", status.code());
+            exit(1);
         }
     }
-    fs::remove_file(zip_path).unwrap();
-}
-
-fn download_pip() {
-    let client = reqwest::blocking::Client::new();
-    let response = client.get("https://bootstrap.pypa.io/pip/pip.pyz").send().unwrap();
-    let appdata = env::var("APPDATA").unwrap();
-    let pip_path = PathBuf::from(&appdata).join(".URAN").join("python").join("pip.pyz");
-    let mut file = File::create(pip_path).unwrap();
-    file.write_all(&response.bytes().unwrap()).unwrap();
-}
-
-fn install_deps() {
-    let appdata = env::var("APPDATA").unwrap();
-    let python_dir = PathBuf::from(&appdata).join(".URAN").join("python");
-    let python_exe = python_dir.join("pythonw.exe");
-    let pip_path = python_dir.join("pip.pyz");
-    let api_dir = PathBuf::from(&appdata).join(".URAN").join("api");
     
-    let _output = Command::new(python_exe)
-        .arg(pip_path)
-        .arg("install")
-        .arg("-r")
-        .arg("https://raw.githubusercontent.com/Endlad2/Uran-api/refs/heads/main/requirements.txt")
-        .arg("--target")
-        .arg(api_dir)
-        .output()
-        .unwrap();
+    // Создаем ярлык в меню пуск
+    create_start_menu_shortcut(&launcher_path, "URAN");
+    println!("Shortcut created in Start Menu");
 }
 
-fn download_api() {
-    let client = reqwest::blocking::Client::new();
-    let response = client.get("https://github.com/Endlad2/Uran-api/archive/refs/heads/main.zip").send().unwrap();
-    let appdata = env::var("APPDATA").unwrap();
-    let zip_path = PathBuf::from(&appdata).join(".URAN").join("api.zip");
-    let mut file = File::create(&zip_path).unwrap();
-    file.write_all(&response.bytes().unwrap()).unwrap();
-}
-
-fn extract_api() {
-    let appdata = env::var("APPDATA").unwrap();
-    let zip_path = PathBuf::from(&appdata).join(".URAN").join("api.zip");
-    let extract_to = PathBuf::from(&appdata).join(".URAN").join("api");
-    let file = File::open(&zip_path).unwrap();
-    let mut archive = zip::ZipArchive::new(BufReader::new(file)).unwrap();
+#[cfg(target_os = "linux")]
+fn main() {
+    // Используем системный Python
+    let python_cmd = if Command::new("python3").arg("--version").output().is_ok() {
+        "python3"
+    } else if Command::new("python").arg("--version").output().is_ok() {
+        "python"
+    } else {
+        eprintln!("Neither python3 nor python is available");
+        exit(1);
+    };
     
-    for i in 0..archive.len() {
-        let mut file = archive.by_index(i).unwrap();
-        let name = file.name();
-        if name.starts_with("Uran-api-main/") {
-            let relative = &name["Uran-api-main/".len()..];
-            if !relative.is_empty() {
-                let outpath = extract_to.join(relative);
-                if file.is_dir() {
-                    fs::create_dir_all(&outpath).unwrap();
-                } else {
-                    if let Some(p) = outpath.parent() {
-                        if !p.exists() {
-                            fs::create_dir_all(p).unwrap();
-                        }
-                    }
-                    let mut outfile = File::create(&outpath).unwrap();
-                    std::io::copy(&mut file, &mut outfile).unwrap();
-                }
-            }
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let uran_dir = PathBuf::from(&home).join(".URAN");
+    let script_path = uran_dir.join("api/tg.py");
+    let launcher_path = uran_dir.join("launcher");
+    let uran_subdir = uran_dir.join("uran");
+    let _uran_path = uran_subdir.join(URAN_EXE);
+    
+    // Создаем папки если их нет
+    fs::create_dir_all(&uran_subdir).unwrap_or_else(|e| {
+        eprintln!("Failed to create URAN directory: {}", e);
+        exit(1);
+    });
+    
+    // Ищем zip архив
+    let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let zip_file = fs::read_dir(&current_dir)
+        .ok()
+        .and_then(|entries| {
+            entries.filter_map(Result::ok)
+                .find(|entry| {
+                    let file_name = entry.file_name();
+                    let name = file_name.to_string_lossy();
+                    name.starts_with("uran-app-") && name.ends_with(".zip")
+                })
+                .map(|entry| entry.path())
+        });
+    
+    if let Some(zip_path) = zip_file {
+        println!("Extracting {} to {:?}", zip_path.display(), uran_dir);
+        if let Err(e) = extract_zip(&zip_path, &uran_dir) {
+            eprintln!("Failed to extract zip: {}", e);
+            exit(1);
         }
     }
-    fs::remove_file(zip_path).unwrap();
+    
+    // Запускаем Python скрипт если он существует
+    if script_path.exists() {
+        let status = Command::new(python_cmd)
+            .arg(&script_path)
+            .status()
+            .expect("Failed to execute Python script");
+        
+        if !status.success() {
+            eprintln!("Python script exited with error: {:?}", status.code());
+        }
+    }
+    
+    // Делаем launcher исполняемым
+    if launcher_path.exists() {
+        let _ = Command::new("chmod").args(&["+x", &launcher_path.to_string_lossy()]).status();
+    }
+    
+    // Запускаем launcher
+    if !launcher_path.exists() {
+        eprintln!("launcher not found at {:?}", launcher_path);
+        let current_launcher = current_dir.join("launcher");
+        if current_launcher.exists() {
+            println!("Found launcher at {:?}", current_launcher);
+            let _ = Command::new("chmod").args(&["+x", &current_launcher.to_string_lossy()]).status();
+            let status = Command::new(&current_launcher)
+                .status()
+                .expect("Failed to execute launcher");
+            
+            if !status.success() {
+                eprintln!("Launcher exited with error: {:?}", status.code());
+                exit(1);
+            }
+        } else {
+            eprintln!("No launcher found!");
+            exit(1);
+        }
+    } else {
+        let status = Command::new(&launcher_path)
+            .status()
+            .expect("Failed to execute launcher");
+        
+        if !status.success() {
+            eprintln!("Launcher exited with error: {:?}", status.code());
+            exit(1);
+        }
+    }
+    
+    // Создаем ярлык в меню приложений
+    create_application_shortcut(&launcher_path, "URAN");
+    println!("Application shortcut created");
 }
 
-fn download_launcher() {
-    let client = reqwest::blocking::Client::new();
-    let response = client.get("https://github.com/Endlad2/Uran-api/releases/download/pre/launcher.exe").send().unwrap();
-    let appdata = env::var("APPDATA").unwrap();
-    let launcher_path = PathBuf::from(&appdata).join(".URAN").join("launcher.exe");
-    let mut file = File::create(launcher_path).unwrap();
-    file.write_all(&response.bytes().unwrap()).unwrap();
+#[cfg(target_os = "macos")]
+fn main() {
+    // Используем системный Python на macOS
+    let python_cmd = if Command::new("python3").arg("--version").output().is_ok() {
+        "python3"
+    } else {
+        eprintln!("python3 is required on macOS");
+        exit(1);
+    };
+    
+    let home = env::var("HOME").unwrap_or_else(|_| ".".to_string());
+    let uran_dir = PathBuf::from(&home).join(".URAN");
+    let script_path = uran_dir.join("api/tg.py");
+    let launcher_path = uran_dir.join("launcher");
+    let uran_subdir = uran_dir.join("uran");
+    let _uran_path = uran_subdir.join(URAN_EXE);
+    
+    // Создаем папки если их нет
+    fs::create_dir_all(&uran_subdir).unwrap_or_else(|e| {
+        eprintln!("Failed to create URAN directory: {}", e);
+        exit(1);
+    });
+    
+    // Ищем zip архив
+    let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let zip_file = fs::read_dir(&current_dir)
+        .ok()
+        .and_then(|entries| {
+            entries.filter_map(Result::ok)
+                .find(|entry| {
+                    let file_name = entry.file_name();
+                    let name = file_name.to_string_lossy();
+                    name.starts_with("uran-app-") && name.ends_with(".zip")
+                })
+                .map(|entry| entry.path())
+        });
+    
+    if let Some(zip_path) = zip_file {
+        println!("Extracting {} to {:?}", zip_path.display(), uran_dir);
+        if let Err(e) = extract_zip(&zip_path, &uran_dir) {
+            eprintln!("Failed to extract zip: {}", e);
+            exit(1);
+        }
+    }
+    
+    // Запускаем Python скрипт если он существует
+    if script_path.exists() {
+        let status = Command::new(python_cmd)
+            .arg(&script_path)
+            .status()
+            .expect("Failed to execute Python script");
+        
+        if !status.success() {
+            eprintln!("Python script exited with error: {:?}", status.code());
+        }
+    }
+    
+    // Делаем launcher исполняемым
+    if launcher_path.exists() {
+        let _ = Command::new("chmod").args(&["+x", &launcher_path.to_string_lossy()]).status();
+    }
+    
+    // Запускаем launcher
+    if !launcher_path.exists() {
+        eprintln!("launcher not found at {:?}", launcher_path);
+        let current_launcher = current_dir.join("launcher");
+        if current_launcher.exists() {
+            println!("Found launcher at {:?}", current_launcher);
+            let _ = Command::new("chmod").args(&["+x", &current_launcher.to_string_lossy()]).status();
+            let status = Command::new(&current_launcher)
+                .status()
+                .expect("Failed to execute launcher");
+            
+            if !status.success() {
+                eprintln!("Launcher exited with error: {:?}", status.code());
+                exit(1);
+            }
+        } else {
+            eprintln!("No launcher found!");
+            exit(1);
+        }
+    } else {
+        let status = Command::new(&launcher_path)
+            .status()
+            .expect("Failed to execute launcher");
+        
+        if !status.success() {
+            eprintln!("Launcher exited with error: {:?}", status.code());
+            exit(1);
+        }
+    }
+    
+    // Создаем ярлык в папке Applications
+    create_application_shortcut(&launcher_path, "URAN");
+    println!("Application shortcut created in /Applications");
 }
 
-fn create_shortcuts() {
-    let appdata = env::var("APPDATA").unwrap();
-    let program_data = env::var("PROGRAMDATA").unwrap_or_else(|_| r"C:\ProgramData".to_string());
-    let start_menu = PathBuf::from(&program_data).join(r"Microsoft\Windows\Start Menu\Programs\URAN");
-    
-    fs::create_dir_all(&start_menu).unwrap();
-    
-    let launcher_exe = PathBuf::from(&appdata).join(".URAN").join("launcher.exe");
-    let launcher_link = start_menu.join("URAN.lnk");
-    
-    let uninstall_bat = start_menu.join("Uninstall.bat");
-    let mut bat_file = File::create(&uninstall_bat).unwrap();
-    let bat_content = format!(r#"@echo off
-echo Удаление URAN...
-rmdir /s /q "{}"
-echo Удаление завершено!
-timeout /t 3
-"#, PathBuf::from(&appdata).join(".URAN").display());
-    bat_file.write_all(bat_content.as_bytes()).unwrap();
-    
-    let vbs_script = start_menu.join("create_shortcut.vbs");
-    let mut vbs_file = File::create(&vbs_script).unwrap();
-    let vbs_content = format!(r#"
-Set oWS = WScript.CreateObject("WScript.Shell")
-sLinkFile = "{}"
-Set oLink = oWS.CreateShortcut(sLinkFile)
-oLink.TargetPath = "{}"
-oLink.Save
-"#, launcher_link.display().to_string().replace("\\", "\\\\"), launcher_exe.display().to_string().replace("\\", "\\\\"));
-    vbs_file.write_all(vbs_content.as_bytes()).unwrap();
-    
-    Command::new("cscript")
-        .arg("//nologo")
-        .arg(&vbs_script)
-        .output()
-        .unwrap();
-    
-    fs::remove_file(vbs_script).unwrap();
-    
-    let uninstall_link = start_menu.join("Uninstall.lnk");
-    let vbs_script2 = start_menu.join("create_shortcut2.vbs");
-    let mut vbs_file2 = File::create(&vbs_script2).unwrap();
-    let vbs_content2 = format!(r#"
-Set oWS = WScript.CreateObject("WScript.Shell")
-sLinkFile = "{}"
-Set oLink = oWS.CreateShortcut(sLinkFile)
-oLink.TargetPath = "{}"
-oLink.Save
-"#, uninstall_link.display().to_string().replace("\\", "\\\\"), uninstall_bat.display().to_string().replace("\\", "\\\\"));
-    vbs_file2.write_all(vbs_content2.as_bytes()).unwrap();
-    
-    Command::new("cscript")
-        .arg("//nologo")
-        .arg(&vbs_script2)
-        .output()
-        .unwrap();
-    
-    fs::remove_file(vbs_script2).unwrap();
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+fn main() {
+    eprintln!("Unsupported operating system");
+    exit(1);
 }

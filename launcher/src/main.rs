@@ -20,7 +20,11 @@ fn main() {
     
     let python_path = appdata.join(".URAN").join("python").join("pythonw.exe");
     let script_path = appdata.join(".URAN").join("api").join("tg.py");
-    let uran_path = env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(URAN_EXE);
+    // Исправлено: бинарник ищется в подпапке "uran"
+    let uran_path = env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("uran")
+        .join(URAN_EXE);
     
     if !python_path.exists() {
         eprintln!("Python not found at {:?}", python_path);
@@ -69,7 +73,8 @@ fn main() {
     };
     
     let script_path = "api/tg.py";
-    let uran_path = "./uran";
+    // Исправлено: бинарник ищется в подпапке "uran"
+    let uran_path = "./uran/uran";
     
     if !PathBuf::from(script_path).exists() {
         eprintln!("Script not found at {}", script_path);
