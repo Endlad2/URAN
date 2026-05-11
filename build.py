@@ -5,6 +5,10 @@ import sys
 import os
 from pathlib import Path
 
+if sys.platform == "win32":
+    sys.stdout.reconfigure(encoding='utf-8')
+    sys.stderr.reconfigure(encoding='utf-8')
+
 def run_command(cmd, cwd=None):
     print(f"\n>>> Выполнение: {cmd} (в {cwd or '.'})")
     result = subprocess.run(cmd, shell=True, cwd=cwd)
@@ -111,7 +115,7 @@ def main():
             print(f"Не найдено: {dir_path}")
     
     print("\n" + "=" * 50)
-    print("✅ СБОРКА УДАЛАСЬ!")
+    print("СБОРКА УДАЛАСЬ!")
     print("=" * 50)
     print(f"Результаты находятся в папке: {build_dir.absolute()}")
     print(f"  - Setup: {setup_dest.name}")
