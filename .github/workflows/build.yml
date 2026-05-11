@@ -3,9 +3,14 @@ name: Build Multi-Platform
 on:
   push:
     branches: [ main, master ]
+    tags:
+      - 'v*'
   pull_request:
     branches: [ main, master ]
   workflow_dispatch:
+
+env:
+  APP_NAME: uran
 
 jobs:
   build:
@@ -83,18 +88,11 @@ jobs:
         with:
           node-version: '20'
 
-      # Setup Python (для запуска build.py)
+      # Setup Python
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-
-      # Install Python dependencies if needed
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          # Раскомментируйте если нужны дополнительные пакеты
-          # pip install -r requirements.txt
 
       # Run build.py
       - name: Run build.py
@@ -106,43 +104,156 @@ jobs:
           ARCH: ${{ matrix.arch }}
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ env.CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER }}
 
-      # Upload build artifacts
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: build-${{ matrix.artifact_suffix }}
-          path: build/
-          retention-days: 30
-          if-no-files-found: error
+      # Prepare artifacts for release
+      - name: Prepare artifacts
+        shell: bash
+        run: |
+          echo "=== Preparing artifacts for ${{ matrix.artifact_suffix }} ==="
+          
+          # Create archive directory
+          mkdir -p archive
+          
+          # Variables
+          ZIP_NAME="${{ env.APP_NAME }}-${{ matrix.artifact_suffix }}.zip"
+          SETUP_NAME="setup-${{ matrix.artifact_suffix }}"
+          
+          if [[ "${{ matrix.platform }}" == "windows" ]]; then
+            # For Windows
+            SETUP_NAME="${SETUP_NAME}.exe"
+            
+            # Create zip with uran and launcher
+            if [ -d "build/uran-app" ]; then
+              mv build/uran-app archive/uran
+              zip -r "$ZIP_NAME" archive/uran
+              echo "✅ Created $ZIP_NAME with uran folder"
+            elif [ -f "build/uran.exe" ]; then
+              cp build/uran.exe archive/
+              zip -r "$ZIP_NAME" archive/uran.exe
+              echo "✅ Created $ZIP_NAME with uran.exe"
+            fi
+            
+            # Rename installer to setup
+            if [ -f "build/uran_installer.exe" ]; then
+              cp build/uran_installer.exe "$SETUP_NAME"
+              echo "✅ Created $SETUP_NAME"
+            elif [ -f "build/uran_installer" ]; then
+              cp build/uran_installer "$SETUP_NAME"
+              echo "✅ Created $SETUP_NAME"
+            fi
+            
+          elif [[ "${{ matrix.platform }}" == "linux" ]]; then
+            # For Linux
+            # Create zip with uran and launcher
+            if [ -d "build/uran-app" ]; then
+              mv build/uran-app archive/uran
+              zip -r "$ZIP_NAME" archive/uran
+              echo "✅ Created $ZIP_NAME"
+            elif [ -f "build/uran" ]; then
+              cp build/uran archive/
+              chmod +x archive/uran
+              zip -r "$ZIP_NAME" archive/uran
+              echo "✅ Created $ZIP_NAME"
+            fi
+            
+            # Rename installer to setup
+            if [ -f "build/uran_installer" ]; then
+              cp build/uran_installer "$SETUP_NAME"
+              chmod +x "$SETUP_NAME"
+              echo "✅ Created $SETUP_NAME"
+            fi
+            
+          else # macOS
+            # For macOS
+            # Create zip with uran and launcher
+            if [ -d "build/uran.app" ]; then
+              mv build/uran.app archive/uran.app
+              zip -r "$ZIP_NAME" archive/uran.app
+              echo "✅ Created $ZIP_NAME"
+            elif [ -f "build/uran" ]; then
+              cp build/uran archive/
+              chmod +x archive/uran
+              zip -r "$ZIP_NAME" archive/uran
+              echo "✅ Created $ZIP_NAME"
+            fi
+            
+            # Rename installer to setup
+            if [ -f "build/uran_installer" ]; then
+              cp build/uran_installer "$SETUP_NAME"
+              chmod +x "$SETUP_NAME"
+              echo "✅ Created $SETUP_NAME"
+            fi
+          fi
+          
+          # Copy launcher if exists separately
+          if [ -f "build/launcher" ] || [ -f "build/launcher.exe" ]; then
+            if [[ "${{ matrix.platform }}" == "windows" ]]; then
+              if [ -f "build/launcher.exe" ]; then
+                cp build/launcher.exe archive/launcher.exe
+                zip -u "$ZIP_NAME" archive/launcher.exe
+              fi
+            else
+              if [ -f "build/launcher" ]; then
+                cp build/launcher archive/launcher
+                chmod +x archive/launcher
+                zip -u "$ZIP_NAME" archive/launcher
+              fi
+            fi
+            echo "✅ Added launcher to zip"
+          fi
+          
+          # List created files
+          echo "=== Created files ==="
+          ls -la *.zip 2>/dev/null || echo "No zip files"
+          ls -la setup-* 2>/dev/null || echo "No setup files"
+          
+          # Move files for upload
+          mkdir -p release-artifacts
+          mv *.zip release-artifacts/ 2>/dev/null || true
+          mv setup-* release-artifacts/ 2>/dev/null || true
 
-  # Upload all artifacts combined
-  upload-all-artifacts:
+      # Upload artifacts for release
+      - name: Upload artifacts to Release
+        uses: softprops/action-gh-release@v1
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            release-artifacts/*.zip
+            release-artifacts/setup-*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Upload as workflow artifacts (for PR or manual runs)
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        if: "!startsWith(github.ref, 'refs/tags/')"
+        with:
+          name: release-artifacts-${{ matrix.artifact_suffix }}
+          path: release-artifacts/
+          retention-days: 30
+
+  # Create release summary
+  create-release:
     needs: build
     runs-on: ubuntu-latest
-    if: always() && github.event_name != 'pull_request'
+    if: startsWith(github.ref, 'refs/tags/') && github.event_name != 'pull_request'
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: release-artifacts-*
           path: all-artifacts
-          pattern: build-*
           merge-multiple: true
           
-      - name: Create combined archive
+      - name: List all artifacts
         run: |
-          if [ -d "all-artifacts" ] && [ "$(ls -A all-artifacts)" ]; then
-            cd all-artifacts
-            zip -r ../all-builds-$(date +%Y%m%d-%H%M%S).zip .
-            cd ..
-            echo "Combined archive created with $(ls all-artifacts | wc -l) files"
-          else
-            echo "No artifacts to combine"
-          fi
+          echo "=== All artifacts ==="
+          ls -la all-artifacts/
           
-      - name: Upload combined archive
-        uses: actions/upload-artifact@v4
+      - name: Upload to release (all artifacts)
+        uses: softprops/action-gh-release@v1
         with:
-          name: all-builds-combined
-          path: all-builds-*.zip
-          retention-days: 30
-          if-no-files-found: warn
+          files: all-artifacts/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
